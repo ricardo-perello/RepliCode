@@ -1,0 +1,9 @@
+[package]
+name = "replicode"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasmtime = "18.0"
+wasmtime-wasi = "18.0"
+anyhow = "1.0"

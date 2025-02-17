@@ -1,0 +1,57 @@
+# General OS-specific files
+.DS_Store
+Thumbs.db
+
+# macOS-specific files
+*.swp
+*.swo
+._*
+.Trashes
+.idea/
+.vscode/
+*.log
+
+# Linux-specific files
+*.out
+*.o
+*.so
+*.a
+*.la
+*.lo
+*.s
+
+# Rust build artifacts
+target/
+Cargo.lock
+*.rs.bk
+*.rlib
+
+# Rust debugging
+*.dSYM/
+*.profraw
+*.profdata
+
+# C build artifacts
+*.d
+*.gcda
+*.gcno
+*.gcov
+*.lst
+*.su
+
+# Wasmtime and WASI build artifacts
+wasm_programs/build/
+wasm_programs/*.wasm
+runtime/debug/
+runtime/release/
+
+# Compiled binaries (Linux/macOS)
+runtime/*.bin
+runtime/*.exe
+
+# Editor/IDE backups and metadata
+*.bak
+*.swp
+*.swo
+*.tmp
+*.log
