@@ -1,6 +1,11 @@
-WASI_SDK_PATH = $(shell brew --prefix wasi-sdk)/share/wasi-sysroot
+# Use wasm32-wasi-clang wrapper for WASI compilation
+WASM_CC = wasm32-wasi-clang
 
 all: build/hello.wasm
 
 build/hello.wasm: hello.c
-	clang --target=wasm32-wasi --sysroot=$(WASI_SDK_PATH) -o build/hello.wasm hello.c
+	$(WASM_CC) -o build/hello.wasm hello.c
+
+# Clean rule to remove compiled WASM binaries
+clean:
+	rm -rf build/*.wasm
