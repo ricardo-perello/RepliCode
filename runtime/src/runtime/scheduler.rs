@@ -24,20 +24,15 @@ pub fn run_scheduler(mut processes: Vec<Process>, store: &mut Store<()>) -> Resu
                     // Attempt to downcast the error to a Wasmtime Trap
                     if let Some(trap) = e.downcast_ref::<Trap>() {
                         let _ = store.set_fuel(20_000)?;
-                        still_running.push(process);
                         // Check the trap message
                         let trapmsg = trap.to_string();
                         if trapmsg == "block" {
                             println!("Process blocked");
+                            still_running.push(process);
                         } else if trapmsg.contains("fuel") {
                             println!("Process ran out of fuel!");
-                        } else {
-                            // It's a trap, but not "block"
-                            return Err(e);
+                            still_running.push(process);
                         }
-                    } else {
-                        // Not even a Wasmtime trap, some other error
-                        return Err(e);
                     }
                 }
             }
