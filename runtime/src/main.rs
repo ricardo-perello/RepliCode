@@ -8,9 +8,12 @@ use runtime::process::load_process;
 
 fn main() -> Result<()> {
     // Create the Wasmtime engine and load the module.
-    let engine = Engine::default();
-    let module = Module::from_file(&engine, "../wasm_programs/build/hello.wasm")?;
+    let mut config = Config::new();
+    config.consume_fuel(true);
+    let engine = Engine::new(&config)?;
+    let module = Module::from_file(&engine, "../wasm_programs/build/hello.wasm")?; //TODO in the future we should have a generic one that takes all .wasm files from specified folder 
     let mut store = Store::new(&engine, ());
+    let _ = store.set_fuel(20_000);
     
     // Set up the linker and register our custom WASI syscalls.
     let mut linker = Linker::new(&engine);
