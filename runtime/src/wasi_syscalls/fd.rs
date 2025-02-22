@@ -2,6 +2,17 @@ use wasmtime::{Caller, Extern};
 use std::io::{self, Write};
 use std::convert::TryInto;
 use crate::runtime::process::{ProcessData, ProcessState};
+use std::cmp;
+use once_cell::sync::Lazy;
+use std::sync::{Mutex, Condvar};
+
+
+
+
+// Define and export the global input buffer.
+pub static GLOBAL_INPUT: Lazy<(Mutex<Vec<u8>>, Condvar)> = Lazy::new(|| {
+    (Mutex::new(Vec::new()), Condvar::new())
+});
 
 /// Dummy implementation for fd_close: simply logs the call.
 pub fn wasi_fd_close(_caller: Caller<'_, ProcessData>, fd: i32) -> i32 {
@@ -21,10 +32,6 @@ pub fn wasi_fd_seek(_caller: Caller<'_, ProcessData>, fd: i32, offset: i64, when
     0
 }
 
-/// Custom implementation for fd_read.
-/// For fd 0 (stdin), we simulate a blocking read:
-/// - If the state is Unblocked, we set it to Blocked, notify the scheduler, and wait until it’s unblocked.
-/// - Then we copy fixed input ("hi\n") into WASM memory and return.
 pub fn wasi_fd_read(
     mut caller: Caller<'_, ProcessData>,
     fd: i32,
@@ -33,64 +40,81 @@ pub fn wasi_fd_read(
     nread: i32,
 ) -> i32 {
     if fd == 0 {
-        let mut state = caller.data().state.lock().unwrap();
-        if *state == ProcessState::Running {
-            println!("Blocking process from fd_read");
-            // Transition to Blocked and notify the scheduler.
-            *state = ProcessState::Blocked;
-            caller.data().cond.notify_all();
-            // Now wait until the scheduler unblocks us.
-            state = caller.data().cond.wait_while(state, |s| *s == ProcessState::Blocked).unwrap();
-        }
-    }
-    println!("Continuing process from fd_read");
-    // Simulate reading by writing a fixed byte string.
-    let input = b"hi\n";
-    let mut total_read = 0;
-    let memory = match caller.get_export("memory") {
-        Some(Extern::Memory(mem)) => mem,
-        _ => {
-            eprintln!("Failed to find memory export");
-            return 1;
-        }
-    };
-    let data = memory.data_mut(&mut caller);
-    for i in 0..iovs_len {
-        let iovec_addr = (iovs as usize) + (i as usize) * 8;
-        if iovec_addr + 8 > data.len() {
-            eprintln!("iovec out of bounds");
-            return 1;
-        }
-        let offset_bytes: [u8; 4] = data[iovec_addr..iovec_addr + 4].try_into().unwrap();
-        let len_bytes: [u8; 4] = data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
-        let offset = u32::from_le_bytes(offset_bytes) as usize;
-        let len = u32::from_le_bytes(len_bytes) as usize;
-        if offset + len > data.len() {
-            eprintln!("data slice out of bounds");
-            return 1;
-        }
-        let to_copy = std::cmp::min(len, input.len());
-        data[offset..offset + to_copy].copy_from_slice(&input[..to_copy]);
-        total_read += to_copy;
-    }
-    let total_read_bytes = (total_read as u32).to_le_bytes();
-    let nread_ptr = nread as usize;
-    if nread_ptr + 4 > data.len() {
-        eprintln!("nread pointer out of bounds");
-        return 1;
-    }
-    data[nread_ptr..nread_ptr + 4].copy_from_slice(&total_read_bytes);
+        // Access the global input buffer.
+        let (global_lock, global_cond) = &*GLOBAL_INPUT;
+        let mut global_buf = global_lock.lock().unwrap();
 
-    // After the read, transition back to Unblocked (i.e. resume execution).
-    {
-        println!("Unblocking process from fd_read");
-        let mut s = caller.data().state.lock().unwrap();
-        *s = ProcessState::Running;
+        // If no input is available, block this process.
+        if global_buf.is_empty() {
+            let mut state = caller.data().state.lock().unwrap();
+            if *state == ProcessState::Running {
+                println!("Blocking process from fd_read (waiting for input)...");
+                *state = ProcessState::Blocked;
+                caller.data().cond.notify_all();
+            }
+            drop(state); // Drop process state lock before waiting on global input.
+            // Wait until data is available in the global input buffer.
+            global_buf = global_cond.wait_while(global_buf, |buf| buf.is_empty()).unwrap();
+        }
+
+        // At this point, global_buf has some data.
+        // Copy as much as possible into WASM memory.
+        let input = global_buf.clone();
+        // Clear the global buffer after copying.
+        global_buf.clear();
+
+        let mut total_read = 0;
+        let memory = match caller.get_export("memory") {
+            Some(Extern::Memory(mem)) => mem,
+            _ => {
+                eprintln!("Failed to find memory export");
+                return 1;
+            }
+        };
+        let data = memory.data_mut(&mut caller);
+        for i in 0..iovs_len {
+            let iovec_addr = (iovs as usize) + (i as usize) * 8;
+            if iovec_addr + 8 > data.len() {
+                eprintln!("iovec out of bounds");
+                return 1;
+            }
+            let offset_bytes: [u8; 4] = data[iovec_addr..iovec_addr + 4].try_into().unwrap();
+            let len_bytes: [u8; 4] = data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
+            let offset = u32::from_le_bytes(offset_bytes) as usize;
+            let len = u32::from_le_bytes(len_bytes) as usize;
+            if offset + len > data.len() {
+                eprintln!("data slice out of bounds");
+                return 1;
+            }
+            let to_copy = cmp::min(len, input.len() - total_read);
+            data[offset..offset + to_copy].copy_from_slice(&input[total_read..total_read + to_copy]);
+            total_read += to_copy;
+            if total_read >= input.len() {
+                break;
+            }
+        }
+        let total_read_bytes = (total_read as u32).to_le_bytes();
+        let nread_ptr = nread as usize;
+        if nread_ptr + 4 > data.len() {
+            eprintln!("nread pointer out of bounds");
+            return 1;
+        }
+        data[nread_ptr..nread_ptr + 4].copy_from_slice(&total_read_bytes);
+
+        // After reading input, mark process as Running (i.e. unblocked).
+        {
+            println!("Unblocking process from fd_read after input received");
+            let mut s = caller.data().state.lock().unwrap();
+            *s = ProcessState::Running;
+        }
+        caller.data().cond.notify_all();
+        0
+    } else {
+        // For non-stdin fds, return an error.
+        eprintln!("fd_read called with unsupported fd: {}", fd);
+        1
     }
-    caller.data().cond.notify_all();
-    0
 }
-
 use std::thread;
 use std::time::Duration;
 

@@ -26,7 +26,7 @@ pub fn run_scheduler(mut processes: Vec<Process>) -> Result<()> {
                     {
                         let mut guard = process.data.state.lock().unwrap();
                         if let ProcessState::Blocked = *guard {
-                            println!("Unblocking process from scheduler");
+                            //println!("Unblocking process from scheduler");
                             *guard = ProcessState::Running;
                         }
                     }
