@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Condvar};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 use wasmtime::{Engine, Store, Module, Linker};
 
 use crate::wasi_syscalls;
@@ -13,11 +14,19 @@ pub enum ProcessState {
     Finished,  // Completed execution
 }
 
+#[derive(Debug, Clone)]
+pub enum BlockReason {
+    StdinRead,
+    Timeout { resume_after: Instant },
+    None, // or other reasons
+}
+
 // ProcessData is the data stored in the Wasmtime store.
 #[derive(Clone)]
 pub struct ProcessData {
     pub state: Arc<Mutex<ProcessState>>,
     pub cond: Arc<Condvar>,
+    pub block_reason: Arc<Mutex<Option<BlockReason>>>,
 }
 
 pub struct Process {
@@ -38,7 +47,8 @@ pub fn start_process(path: PathBuf) -> Result<Process> {
     // Initially, the process is Unblocked.
     let state = Arc::new(Mutex::new(ProcessState::Running));
     let cond = Arc::new(Condvar::new());
-    let process_data = ProcessData { state: state.clone(), cond: cond.clone() };
+    let reason = Arc::new(Mutex::new(None));
+    let process_data = ProcessData { state: state.clone(), cond: cond.clone(),  block_reason: reason};
 
     // Clone the process data for the thread.
     let thread_data = process_data.clone();

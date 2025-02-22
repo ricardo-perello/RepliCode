@@ -1,7 +1,7 @@
 use wasmtime::{Caller, Extern};
 use std::io::{self, Write};
 use std::convert::TryInto;
-use crate::runtime::process::{ProcessData, ProcessState};
+use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
 use std::cmp;
 use once_cell::sync::Lazy;
 use std::sync::{Mutex, Condvar};
@@ -46,21 +46,32 @@ pub fn wasi_fd_read(
 
         // If no input is available, block this process.
         if global_buf.is_empty() {
-            let mut state = caller.data().state.lock().unwrap();
-            if *state == ProcessState::Running {
-                println!("Blocking process from fd_read (waiting for input)...");
-                *state = ProcessState::Blocked;
-                caller.data().cond.notify_all();
+            {
+                let mut st = caller.data().state.lock().unwrap();
+                if *st == ProcessState::Running {
+                    println!(">>> fd_read: Setting state to Blocked");
+                    *st = ProcessState::Blocked;
+                }
+    
+                // record the reason if you want
+                let mut reason = caller.data().block_reason.lock().unwrap();
+                *reason = Some(BlockReason::StdinRead);
             }
-            drop(state); // Drop process state lock before waiting on global input.
-            // Wait until data is available in the global input buffer.
-            global_buf = global_cond.wait_while(global_buf, |buf| buf.is_empty()).unwrap();
+            // Notify the scheduler that we are blocked
+            caller.data().cond.notify_all();
+    
+            // Now park ourselves until the scheduler unblocks us by setting state = Running
+            global_buf = global_cond.wait_while(global_buf, |_buf| {
+                let st = caller.data().state.lock().unwrap();
+                // stay waiting while the process is Blocked
+                *st == ProcessState::Blocked
+            }).unwrap();
         }
         
 
         // At this point, global_buf has some data.
         // Copy as much as possible into WASM memory.
-
+        println!("got past it");
         println!("processState is {:?}", *caller.data().state.lock().unwrap());
         let input = global_buf.clone();
         // Clear the global buffer after copying.

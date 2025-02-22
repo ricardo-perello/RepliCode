@@ -24,14 +24,19 @@ fn spawn_input_thread() {
         loop {
             let mut buffer = [0u8; 1024];
             match stdin.read(&mut buffer) {
-                Ok(n) if n > 0 => {
+                Ok(0) => {
+                    eprintln!("Got 0 bytes; treating as EOF. Exiting input loop.");
+                    break;
+                }
+                Ok(n) => {
                     let mut data = lock.lock().unwrap();
                     data.extend_from_slice(&buffer[..n]);
                     cond.notify_all();
-                },
-                Ok(_) => break, // EOF
+                }
                 Err(e) => {
                     eprintln!("Error reading stdin: {:?}", e);
+                    // Possibly break or keep going
+                    break;
                 }
             }
         }
