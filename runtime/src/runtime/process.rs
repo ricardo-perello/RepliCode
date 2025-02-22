@@ -1,70 +1,90 @@
 use anyhow::Result;
-use std::sync::{Arc, Mutex, Condvar};
-use std::thread::{JoinHandle, self};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, Condvar};
+use std::thread::{self, JoinHandle};
 use wasmtime::{Engine, Store, Module, Linker};
-use crate::wasi_syscalls::register;
 
-#[derive(Debug, Clone, Copy)] //TODO check with Gauthier if this is ok to do.
+use crate::wasi_syscalls;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessState {
-    Running,
-    Blocked,
-    Finished,
+    Running, // Running normally
+    Blocked,   // Waiting (yielded)
+    Finished,  // Completed execution
+}
+
+// ProcessData is the data stored in the Wasmtime store.
+#[derive(Clone)]
+pub struct ProcessData {
+    pub state: Arc<Mutex<ProcessState>>,
+    pub cond: Arc<Condvar>,
 }
 
 pub struct Process {
     pub thread: JoinHandle<()>,
-    pub state: Arc<Mutex<ProcessState>>,
-    pub cond: Arc<Condvar>,
-    // Possibly store additional info here, like the wasmtime::Store, etc.
+    pub data: ProcessData,
 }
 
+/// Spawns a new OS thread that sets up Wasmtime, registers our custom WASI syscalls,
+/// instantiates the module, and calls _start.
+/// Before returning, the main thread waits until the WASM code has performed a blocking action.
 pub fn start_process(path: PathBuf) -> Result<Process> {
-    // 1) Build engine, linker, store, etc.
+    // Set up the Wasmtime engine and load the module.
     let mut config = wasmtime::Config::new();
     config.consume_fuel(true);
     let engine = Engine::new(&config)?;
-
     let module = Module::from_file(&engine, &path)?;
     
-    // For blocked/unblocked tracking
+    // Initially, the process is Unblocked.
     let state = Arc::new(Mutex::new(ProcessState::Running));
     let cond = Arc::new(Condvar::new());
+    let process_data = ProcessData { state: state.clone(), cond: cond.clone() };
 
-    // 2) Spawn the OS thread
-    let thread_state = Arc::clone(&state);
-    let thread_cond = Arc::clone(&cond);
+    // Clone the process data for the thread.
+    let thread_data = process_data.clone();
+
+    // Spawn the OS thread.
     let thread = thread::spawn(move || {
-        let mut store = Store::new(&engine, ());
+        // Create a store with our ProcessData.
+        let mut store = Store::new(&engine, thread_data);
         let _ = store.set_fuel(20_000);
 
-        let mut linker = Linker::new(&engine);
-        let _ = register(&mut linker); // register custom WASI
+        // Create a linker that uses ProcessData.
+        let mut linker: Linker<ProcessData> = Linker::new(&engine);
+        // Register our custom WASI syscalls.
+        wasi_syscalls::register(&mut linker).expect("Failed to register WASI syscalls");
 
-        // Instantiate the module
+        // Instantiate the module.
         let instance = linker.instantiate(&mut store, &module)
-            .expect("Failed to instantiate WASM");
+            .expect("Failed to instantiate module");
 
-        // Call _start
-        let start = instance
+        // Retrieve the _start function.
+        let start_func = instance
             .get_typed_func::<(), ()>(&mut store, "_start")
             .expect("Missing _start function");
-        
-        let result = start.call(&mut store, ());
+
+        // Run the WASM code.
+        // When a blocking call is encountered (e.g. in fd_read),
+        // the custom WASI syscall will set state to Blocked and wait.
+        let result = start_func.call(&mut store, ());
         if let Err(e) = result {
-            // If a trap => handle block, OOM, etc. or just log
-            eprintln!("Trap or error: {e}");
+            eprintln!("Error executing wasm: {:?}", e);
         }
 
-        // Mark it as finished so the scheduler knows
-        let mut s = thread_state.lock().unwrap();
-        *s = ProcessState::Finished;
-        thread_cond.notify_all();
+        // When _start returns (or traps), mark the process as Finished.
+        {
+            let mut s = store.data().state.lock().unwrap();
+            *s = ProcessState::Finished;
+        }
+        store.data().cond.notify_all();
     });
 
-    Ok(Process {
-        thread,
-        state,
-        cond,
-    })
+    // In the main thread, wait until the process performs a blocking action.
+    {
+        let mut guard = state.lock().unwrap();
+        // Wait while state is Unblocked.
+        guard = cond.wait_while(guard, |s| *s == ProcessState::Running).unwrap();
+    }
+
+    Ok(Process { thread, data: process_data })
 }

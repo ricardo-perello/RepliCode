@@ -1,38 +1,54 @@
 use anyhow::Result;
-use std::sync::MutexGuard;
 use crate::runtime::process::{Process, ProcessState};
+use std::thread::sleep;
+use std::time::Duration;
 
+/// A simple round-robin scheduler. It loops over all processes,
+/// checks their shared state, and if a process is Blocked (for example, waiting on input),
+/// the scheduler “unblocks” it (simulating that data has arrived).
+/// Finished processes are joined and dropped.
 pub fn run_scheduler(mut processes: Vec<Process>) -> Result<()> {
     while !processes.is_empty() {
         let mut still_running = Vec::new();
-
-        // Sequentially go through them:
         for process in processes {
-            // Lock the state to see if it's Blocked, Running, or Finished 
-
-            let process_state = {
-                let guard = process.state.lock().unwrap();
-                *guard // copy out the enum variant
+            // Copy the current state.
+            let state_copy = {
+                let guard = process.data.state.lock().unwrap();
+                *guard
             };
-
-            match process_state {
+            match state_copy {
                 ProcessState::Finished => {
+                    // Process is done: join its thread.
                     let _ = process.thread.join();
                 }
                 ProcessState::Blocked => {
-                    // Move it to the back of the queue
+                    // For demonstration we “unblock” a blocked process.
+                    {
+                        let mut guard = process.data.state.lock().unwrap();
+                        if let ProcessState::Blocked = *guard {
+                            println!("Unblocking process from scheduler");
+                            *guard = ProcessState::Running;
+                        }
+                    }
+                    process.data.cond.notify_all();
                     still_running.push(process);
                 }
                 ProcessState::Running => {
-                    // TODO make round robin scheduler with fixed time slices.
+                    // Let the process run for a time slice.
+                    sleep(Duration::from_millis(10));
+                    // Then simulate that it is blocking (for example, waiting on I/O).
+                    {
+                        let mut guard = process.data.state.lock().unwrap();
+                        if let ProcessState::Running = *guard {
+                            *guard = ProcessState::Blocked;
+                        }
+                    }
+                    process.data.cond.notify_all();
                     still_running.push(process);
                 }
             }
         }
-
         processes = still_running;
-
     }
-
     Ok(())
 }

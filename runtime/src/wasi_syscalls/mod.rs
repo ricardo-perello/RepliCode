@@ -1,9 +1,8 @@
 use anyhow::Result;
 use wasmtime::Linker;
-
+use crate::runtime::process::ProcessData;
 pub mod fd;
-
-pub fn register(linker: &mut Linker<()>) -> Result<()> {
+pub fn register(linker: &mut Linker<ProcessData>) -> Result<()> {
     linker.func_wrap("wasi_snapshot_preview1", "fd_close", fd::wasi_fd_close)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_fdstat_get", fd::wasi_fd_fdstat_get)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_seek", fd::wasi_fd_seek)?;
