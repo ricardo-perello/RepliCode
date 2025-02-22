@@ -132,19 +132,85 @@ pub fn wasi_fd_read(
 use std::thread;
 use std::time::Duration;
 
-/// Dummy implementation for poll_oneoff: logs the call and sleeps briefly.
+/// Real implementation for poll_oneoff.
+/// This function reads the first subscription (assumed to be a clock/sleep subscription),
+/// extracts the timeout (in nanoseconds), sleeps for that duration,
+/// then writes a dummy event back into WASM memory and sets the number of events to 1.
 pub fn wasi_poll_oneoff(
-    _caller: Caller<'_, ProcessData>,
+    mut caller: Caller<'_, ProcessData>,
     subscriptions_ptr: i32,
     events_ptr: i32,
     nsubscriptions: i32,
     nevents_ptr: i32,
 ) -> i32 {
-    println!(
-        "Called poll_oneoff: subscriptions_ptr={}, events_ptr={}, nsubscriptions={}, nevents_ptr={}",
-        subscriptions_ptr, events_ptr, nsubscriptions, nevents_ptr
-    );
-    thread::sleep(Duration::from_millis(1));
+    // Get the WASM memory.
+    let memory = match caller.get_export("memory") {
+        Some(Extern::Memory(mem)) => mem,
+        _ => {
+            eprintln!("poll_oneoff: Failed to find memory export");
+            return 1;
+        }
+    };
+    
+    // Get a reference to the memory data for reading.
+    let mem_data = memory.data(&caller);
+    
+    // For simplicity, assume each subscription is 48 bytes.
+    let subscription_size = 48;
+    let sub_addr = subscriptions_ptr as usize;
+    if sub_addr + subscription_size > mem_data.len() {
+        eprintln!("poll_oneoff: Subscription out of bounds");
+        return 1;
+    }
+    
+    // Read userdata (u64) from offset 0.
+    let userdata_bytes = &mem_data[sub_addr..sub_addr+8];
+    let userdata = u64::from_le_bytes(userdata_bytes.try_into().unwrap());
+    
+    // Read the subscription type from offset 8 (u16).
+    let type_bytes = &mem_data[sub_addr+8..sub_addr+10];
+    let sub_type = u16::from_le_bytes(type_bytes.try_into().unwrap());
+    
+    // Read the timeout (u64) from offset 16.
+    let timeout_bytes = &mem_data[sub_addr+16..sub_addr+24];
+    let timeout_nanos = u64::from_le_bytes(timeout_bytes.try_into().unwrap());
+    let sleep_nanos = if timeout_nanos == 0 { 9_000_000_000 } else { timeout_nanos }; // TODO fix this part
+    let sleep_duration = Duration::from_nanos(sleep_nanos);
+    println!("poll_oneoff: Sleeping for {:?}", sleep_duration);
+    thread::sleep(sleep_duration);
+    println!("poll_oneoff: userdata = {}, type = {}, timeout_nanos = {}", userdata, sub_type, timeout_nanos);
+    
+    
+    
+    // Now write an event result back into WASM memory.
+    // We assume an event struct of 32 bytes.
+    let event_size = 32;
+    let events_addr = events_ptr as usize;
+    let mut mem_mut = memory.data_mut(&mut caller);
+    if events_addr + event_size > mem_mut.len() {
+        eprintln!("poll_oneoff: Events area out of bounds");
+        return 1;
+    }
+    
+    // Write userdata (copying from the subscription).
+    mem_mut[events_addr..events_addr+8].copy_from_slice(&userdata.to_le_bytes());
+    // Write error (0) as u16 at offset 8.
+    mem_mut[events_addr+8..events_addr+10].copy_from_slice(&0u16.to_le_bytes());
+    // Write event type (using the subscription type) as u16 at offset 10.
+    mem_mut[events_addr+10..events_addr+12].copy_from_slice(&sub_type.to_le_bytes());
+    // Zero the remaining bytes of the event.
+    for byte in &mut mem_mut[events_addr+12..events_addr+event_size] {
+        *byte = 0;
+    }
+    
+    // Write the number of events (1) as a u64 at the address pointed to by nevents_ptr.
+    let nevents_addr = nevents_ptr as usize;
+    if nevents_addr + 8 > mem_mut.len() {
+        eprintln!("poll_oneoff: nevents pointer out of bounds");
+        return 1;
+    }
+    mem_mut[nevents_addr..nevents_addr+8].copy_from_slice(&1u64.to_le_bytes());
+    
     0
 }
 
