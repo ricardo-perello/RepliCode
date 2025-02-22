@@ -1,29 +1,29 @@
 mod runtime;
 mod wasi_syscalls;
 
+use std::fs;
+use std::path::PathBuf;
 use anyhow::Result;
-use wasmtime::*;
-use runtime::scheduler::run_scheduler;
-use runtime::process::load_process;
+use crate::runtime::process::start_process;
+use crate::runtime::scheduler::run_scheduler;
 
 fn main() -> Result<()> {
-    // Create the Wasmtime engine and load the module.
-    let mut config = Config::new();
-    config.consume_fuel(true);
-    let engine = Engine::new(&config)?;
-    let module = Module::from_file(&engine, "../wasm_programs/build/hello.wasm")?; //TODO in the future we should have a generic one that takes all .wasm files from specified folder 
-    let mut store = Store::new(&engine, ());
-    let _ = store.set_fuel(20_000);
-    
-    // Set up the linker and register our custom WASI syscalls.
-    let mut linker = Linker::new(&engine);
-    wasi_syscalls::register(&mut linker)?;
-    
-    // Load a process using the module.
-    let process_instance = load_process(&mut store, &module, &linker)?;
-    
-    // Run a simple scheduler (round-robin stub) with the process.
-    run_scheduler(vec![process_instance], &mut store)?;
-    
+    let wasm_folder = "../wasm_programs/build";
+
+    // Gather .wasm paths
+    let mut processes = Vec::new();
+    for entry in fs::read_dir(wasm_folder)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().unwrap_or_default() == "wasm" {
+            // Spawn a thread/process for this WASM
+            let process = start_process(path)?;
+            processes.push(process);
+        }
+    }
+
+    // Now run your scheduler on those processes
+    run_scheduler(processes)?;
+
     Ok(())
 }

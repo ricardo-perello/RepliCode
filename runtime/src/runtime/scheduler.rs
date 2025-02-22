@@ -1,43 +1,38 @@
 use anyhow::Result;
-use wasmtime::Store;
-use wasmtime::Trap;
-use crate::runtime::process::Process;
+use std::sync::MutexGuard;
+use crate::runtime::process::{Process, ProcessState};
 
-pub fn run_scheduler(mut processes: Vec<Process>, store: &mut Store<()>) -> Result<()> {
-    // Continue scheduling until there are no more processes
+pub fn run_scheduler(mut processes: Vec<Process>) -> Result<()> {
     while !processes.is_empty() {
         let mut still_running = Vec::new();
 
+        // Sequentially go through them:
         for process in processes {
-            let start = process
-                .instance
-                .get_typed_func::<(), ()>(&mut *store, "_start")?;
+            // Lock the state to see if it's Blocked, Running, or Finished 
 
-            match start.call(&mut *store, ()) {
-                Ok(()) => {
-                    // Process finished its work.
-                    println!("Process finished");
-                    let remainingGas = store.get_fuel().unwrap();
-                    println!("gas left ${remainingGas}");
+            let process_state = {
+                let guard = process.state.lock().unwrap();
+                *guard // copy out the enum variant
+            };
+
+            match process_state {
+                ProcessState::Finished => {
+                    let _ = process.thread.join();
                 }
-                Err(e) => {
-                    // Attempt to downcast the error to a Wasmtime Trap
-                    if let Some(trap) = e.downcast_ref::<Trap>() {
-                        let _ = store.set_fuel(20_000)?;
-                        // Check the trap message
-                        let trapmsg = trap.to_string();
-                        if trapmsg == "block" {
-                            println!("Process blocked");
-                            still_running.push(process);
-                        } else if trapmsg.contains("fuel") {
-                            println!("Process ran out of fuel!");
-                            still_running.push(process);
-                        }
-                    }
+                ProcessState::Blocked => {
+                    // Move it to the back of the queue
+                    still_running.push(process);
+                }
+                ProcessState::Running => {
+                    // TODO make round robin scheduler with fixed time slices.
+                    still_running.push(process);
                 }
             }
         }
+
         processes = still_running;
+
     }
+
     Ok(())
 }
