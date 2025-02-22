@@ -17,8 +17,7 @@ pub enum ProcessState {
 #[derive(Debug, Clone)]
 pub enum BlockReason {
     StdinRead,
-    Timeout { resume_after: Instant },
-    None, // or other reasons
+    Timeout { resume_after: Instant }, // or other reasons
 }
 
 // ProcessData is the data stored in the Wasmtime store.

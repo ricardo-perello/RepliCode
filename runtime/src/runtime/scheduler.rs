@@ -78,7 +78,7 @@ pub fn run_scheduler(mut processes: Vec<Process>) -> Result<()> {
 /// Returns `true` if there's data in the global buffer.
 pub fn input_buffer_has_data() -> bool {
     // Access the global input buffer.
-    let (global_lock, global_cond) = &*GLOBAL_INPUT;
+    let (global_lock, _global_cond) = &*GLOBAL_INPUT;
     let global_buf = global_lock.lock().unwrap();
     !global_buf.is_empty()
 }

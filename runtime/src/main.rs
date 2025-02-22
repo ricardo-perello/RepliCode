@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::fs;
-use std::path::PathBuf;
+use std::io::{self, Read};
 mod runtime {
     pub mod process;
     pub mod scheduler;
@@ -14,9 +14,6 @@ use std::thread;
 fn spawn_input_thread() {
     // Spawn a dedicated thread to read from stdin.
     thread::spawn(|| {
-        use std::io::{self, Read};
-        use once_cell::sync::Lazy;
-        use std::sync::{Mutex, Condvar};
         // GLOBAL_INPUT is defined in wasi_syscalls/fd.rs.
         use crate::wasi_syscalls::fd::GLOBAL_INPUT;
         let (lock, cond) = &*GLOBAL_INPUT;

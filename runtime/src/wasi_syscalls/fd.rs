@@ -143,6 +143,7 @@ pub fn wasi_poll_oneoff(
     nsubscriptions: i32,
     nevents_ptr: i32,
 ) -> i32 {
+    let _ = nsubscriptions;
     // Get the WASM memory.
     let memory = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
