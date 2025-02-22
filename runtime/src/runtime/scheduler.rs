@@ -22,15 +22,15 @@ pub fn run_scheduler(mut processes: Vec<Process>) -> Result<()> {
                     let _ = process.thread.join();
                 }
                 ProcessState::Blocked => {
-                    // For demonstration we “unblock” a blocked process.
-                    {
-                        let mut guard = process.data.state.lock().unwrap();
-                        if let ProcessState::Blocked = *guard {
-                            //println!("Unblocking process from scheduler");
-                            *guard = ProcessState::Running;
-                        }
-                    }
-                    process.data.cond.notify_all();
+                    // // For demonstration we “unblock” a blocked process.
+                    // {
+                    //     let mut guard = process.data.state.lock().unwrap();
+                    //     if let ProcessState::Blocked = *guard {
+                    //         println!("Unblocking process from scheduler");
+                    //         *guard = ProcessState::Running;
+                    //     }
+                    // }
+                    // process.data.cond.notify_all();
                     still_running.push(process);
                 }
                 ProcessState::Running => {

@@ -79,12 +79,5 @@ pub fn start_process(path: PathBuf) -> Result<Process> {
         store.data().cond.notify_all();
     });
 
-    // In the main thread, wait until the process performs a blocking action.
-    {
-        let mut guard = state.lock().unwrap();
-        // Wait while state is Unblocked.
-        guard = cond.wait_while(guard, |s| *s == ProcessState::Running).unwrap();
-    }
-
     Ok(Process { thread, data: process_data })
 }

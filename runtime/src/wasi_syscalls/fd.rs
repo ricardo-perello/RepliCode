@@ -56,9 +56,12 @@ pub fn wasi_fd_read(
             // Wait until data is available in the global input buffer.
             global_buf = global_cond.wait_while(global_buf, |buf| buf.is_empty()).unwrap();
         }
+        
 
         // At this point, global_buf has some data.
         // Copy as much as possible into WASM memory.
+
+        println!("processState is {:?}", *caller.data().state.lock().unwrap());
         let input = global_buf.clone();
         // Clear the global buffer after copying.
         global_buf.clear();
