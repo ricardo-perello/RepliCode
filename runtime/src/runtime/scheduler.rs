@@ -56,14 +56,12 @@ pub fn run_scheduler(mut processes: Vec<Process>) -> Result<()> {
                     still_running.push(process);
                 }
                 ProcessState::Running => {
-                    // Let the process run for a time slice.
-                    sleep(Duration::from_millis(10));
-                    // Then simulate that it is blocking (for example, waiting on I/O).
+                    still_running.push(process);
+                }
+                ProcessState::Ready => {
                     {
                         let mut guard = process.data.state.lock().unwrap();
-                        if let ProcessState::Running = *guard {
-                            *guard = ProcessState::Blocked;
-                        }
+                        *guard = ProcessState::Running;
                     }
                     process.data.cond.notify_all();
                     still_running.push(process);

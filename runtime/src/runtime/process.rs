@@ -10,6 +10,7 @@ use crate::wasi_syscalls;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessState {
     Running, // Running normally
+    Ready, // Ready to run again
     Blocked,   // Waiting (yielded)
     Finished,  // Completed execution
 }
