@@ -6,14 +6,6 @@ use std::cmp;
 use once_cell::sync::Lazy;
 use std::sync::{Mutex, Condvar};
 
-
-
-
-// Define and export the global input buffer.
-pub static GLOBAL_INPUT: Lazy<(Mutex<Vec<u8>>, Condvar)> = Lazy::new(|| {
-    (Mutex::new(Vec::new()), Condvar::new())
-});
-
 /// Dummy implementation for fd_close: simply logs the call.
 pub fn wasi_fd_close(_caller: Caller<'_, ProcessData>, fd: i32) -> i32 {
     println!("Called fd_close with fd: {}", fd);
@@ -39,103 +31,141 @@ pub fn wasi_fd_read(
     iovs_len: i32,
     nread: i32,
 ) -> i32 {
-    if fd == 0 {
-        // Access the global input buffer.
-        let (global_lock, global_cond) = &*GLOBAL_INPUT;
-        let mut global_buf = global_lock.lock().unwrap();
-
-        // If no input is available, block this process.
-        if global_buf.is_empty() {
-            {
-                let mut st = caller.data().state.lock().unwrap();
-                if *st == ProcessState::Running {
-                    println!(">>> fd_read: Setting state to Blocked");
-                    *st = ProcessState::Blocked;
-                }
-    
-                // record the reason if you want
-                let mut reason = caller.data().block_reason.lock().unwrap();
-                *reason = Some(BlockReason::StdinRead);
-            }
-            // Notify the scheduler that we are blocked
-            caller.data().cond.notify_all();
-    
-            // Now park ourselves until the scheduler unblocks us by setting state = Running
-            global_buf = global_cond.wait_while(global_buf, |_buf| {
-                let st = caller.data().state.lock().unwrap();
-                // stay waiting while the process is Blocked
-                *st == ProcessState::Blocked
-            }).unwrap();
-        }
-        
-
-        // At this point, global_buf has some data.
-        // Copy as much as possible into WASM memory.
-        println!("got past it");
-        println!("processState is {:?}", *caller.data().state.lock().unwrap());
-        let input = global_buf.clone();
-        // Clear the global buffer after copying.
-        global_buf.clear();
-
-        let mut total_read = 0;
-        let memory = match caller.get_export("memory") {
-            Some(Extern::Memory(mem)) => mem,
-            _ => {
-                eprintln!("Failed to find memory export");
+    // First, lock the FD table and extract the data to be read.
+    let (data_to_read, bytes_to_advance) = {
+        let process_data = caller.data();
+        let mut table = process_data.fd_table.lock().unwrap();
+        let fd_entry = match table.get_fd_entry_mut(fd) {
+            Some(entry) => entry,
+            None => {
+                eprintln!("fd_read called with invalid FD: {}", fd);
                 return 1;
             }
         };
-        let data = memory.data_mut(&mut caller);
+
+        // If no data is available, drop the lock and block the process.
+        if fd_entry.read_ptr >= fd_entry.buffer.len() {
+            drop(table);
+            block_process_for_stdin(&mut caller);
+            return 0;
+        }
+
+        // Clone the available data so the lock can be dropped.
+        let available_data = &fd_entry.buffer[fd_entry.read_ptr..];
+        (available_data.to_vec(), available_data.len())
+    };
+
+    // Now that the FD table lock is gone, get a mutable borrow to the memory.
+    let memory = match caller.get_export("memory") {
+        Some(Extern::Memory(mem)) => mem,
+        _ => {
+            eprintln!("Failed to find memory export");
+            return 1;
+        }
+    };
+
+    // Use a new block to scope the immutable borrow from memory.data(&caller)
+    {
+        let mut total_read = 0;
+        {
+            // Borrow memory immutably to iterate over the iovecs.
+            let data = memory.data(&caller);
+            for i in 0..iovs_len {
+                let iovec_addr = (iovs as usize) + (i as usize) * 8;
+                if iovec_addr + 8 > data.len() {
+                    eprintln!("iovec out of bounds");
+                    return 1;
+                }
+                let offset_bytes: [u8; 4] = data[iovec_addr..iovec_addr + 4].try_into().unwrap();
+                let len_bytes: [u8; 4] = data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
+                let offset = u32::from_le_bytes(offset_bytes) as usize;
+                let len = u32::from_le_bytes(len_bytes) as usize;
+                if offset + len > data.len() {
+                    eprintln!("data slice out of bounds");
+                    return 1;
+                }
+                let to_copy = cmp::min(len, data_to_read.len() - total_read);
+                if to_copy == 0 {
+                    break;
+                }
+                // The actual copying is done after we get a mutable reference.
+                // Here we just update the total number of bytes to be read.
+                total_read += to_copy;
+                if total_read >= data_to_read.len() {
+                    break;
+                }
+            }
+        }
+
+        // Now borrow memory mutably to actually copy data into the WASM memory.
+        let data_mut = memory.data_mut(&mut caller);
+        let mut total_read = 0;
         for i in 0..iovs_len {
             let iovec_addr = (iovs as usize) + (i as usize) * 8;
-            if iovec_addr + 8 > data.len() {
+            if iovec_addr + 8 > data_mut.len() {
                 eprintln!("iovec out of bounds");
                 return 1;
             }
-            let offset_bytes: [u8; 4] = data[iovec_addr..iovec_addr + 4].try_into().unwrap();
-            let len_bytes: [u8; 4] = data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
+            let offset_bytes: [u8; 4] = data_mut[iovec_addr..iovec_addr + 4].try_into().unwrap();
+            let len_bytes: [u8; 4] = data_mut[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
             let offset = u32::from_le_bytes(offset_bytes) as usize;
             let len = u32::from_le_bytes(len_bytes) as usize;
-            if offset + len > data.len() {
+            if offset + len > data_mut.len() {
                 eprintln!("data slice out of bounds");
                 return 1;
             }
-            let to_copy = cmp::min(len, input.len() - total_read);
-            data[offset..offset + to_copy].copy_from_slice(&input[total_read..total_read + to_copy]);
+            let to_copy = cmp::min(len, data_to_read.len() - total_read);
+            if to_copy == 0 {
+                break;
+            }
+            data_mut[offset..offset + to_copy]
+                .copy_from_slice(&data_to_read[total_read..total_read + to_copy]);
             total_read += to_copy;
-            if total_read >= input.len() {
+            if total_read >= data_to_read.len() {
                 break;
             }
         }
+        // Write the number of bytes read back into WASM memory.
         let total_read_bytes = (total_read as u32).to_le_bytes();
         let nread_ptr = nread as usize;
-        if nread_ptr + 4 > data.len() {
+        if nread_ptr + 4 > data_mut.len() {
             eprintln!("nread pointer out of bounds");
             return 1;
         }
-        data[nread_ptr..nread_ptr + 4].copy_from_slice(&total_read_bytes);
-
-        // After reading input, mark process as Running (i.e. unblocked).
-        {
-            println!("Unblocking process from fd_read after input received");
-            let mut s = caller.data().state.lock().unwrap();
-            *s = ProcessState::Running;
-        }
-        caller.data().cond.notify_all();
-        0
-    } else {
-        // For non-stdin fds, return an error.
-        eprintln!("fd_read called with unsupported fd: {}", fd);
-        1
+        data_mut[nread_ptr..nread_ptr + 4].copy_from_slice(&total_read_bytes);
     }
+
+    // Finally, re-lock the FD table to update the read pointer.
+    {
+        let process_data = caller.data();
+        let mut table = process_data.fd_table.lock().unwrap();
+        let fd_entry = table.get_fd_entry_mut(fd).unwrap();
+        fd_entry.read_ptr += bytes_to_advance;
+    }
+    0
 }
+
+/// Blocks the process, telling the scheduler we're waiting on stdin.
+fn block_process_for_stdin(caller: &mut Caller<'_, ProcessData>) {
+    {
+        let mut st = caller.data().state.lock().unwrap();
+        if *st == ProcessState::Running {
+            println!("fd_read: Setting process state to Blocked");
+            *st = ProcessState::Blocked;
+        }
+        let mut reason = caller.data().block_reason.lock().unwrap();
+        *reason = Some(BlockReason::StdinRead);
+    }
+    // Notify the scheduler.
+    caller.data().cond.notify_all();
+}
+
 use std::thread;
 use std::time::Duration;
 
 /// Real implementation for poll_oneoff.
-/// This function reads the first subscription (assumed to be a clock/sleep subscription),
-/// extracts the timeout (in nanoseconds), sleeps for that duration,
-/// then writes a dummy event back into WASM memory and sets the number of events to 1.
+/// This function reads a subscription (assumed to be clock/sleep), extracts its timeout,
+/// sleeps for that duration, and then writes a dummy event back into WASM memory.
 pub fn wasi_poll_oneoff(
     mut caller: Caller<'_, ProcessData>,
     subscriptions_ptr: i32,
@@ -144,7 +174,6 @@ pub fn wasi_poll_oneoff(
     nevents_ptr: i32,
 ) -> i32 {
     let _ = nsubscriptions;
-    // Get the WASM memory.
     let memory = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
         _ => {
@@ -152,66 +181,64 @@ pub fn wasi_poll_oneoff(
             return 1;
         }
     };
-    
-    // Get a reference to the memory data for reading.
-    let mem_data = memory.data(&caller);
-    
-    // For simplicity, assume each subscription is 48 bytes.
-    let subscription_size = 48;
-    let sub_addr = subscriptions_ptr as usize;
-    if sub_addr + subscription_size > mem_data.len() {
-        eprintln!("poll_oneoff: Subscription out of bounds");
-        return 1;
-    }
-    
-    // Read userdata (u64) from offset 0.
-    let userdata_bytes = &mem_data[sub_addr..sub_addr+8];
-    let userdata = u64::from_le_bytes(userdata_bytes.try_into().unwrap());
-    
-    // Read the subscription type from offset 8 (u16).
-    let type_bytes = &mem_data[sub_addr+8..sub_addr+10];
-    let sub_type = u16::from_le_bytes(type_bytes.try_into().unwrap());
-    
-    // Read the timeout (u64) from offset 16.
-    let timeout_bytes = &mem_data[sub_addr+16..sub_addr+24];
-    let timeout_nanos = u64::from_le_bytes(timeout_bytes.try_into().unwrap());
-    let sleep_nanos = if timeout_nanos == 0 { 9_000_000_000 } else { timeout_nanos }; // TODO fix this part
+
+    // Use a block to scope the immutable borrow for reading the subscription.
+    let (userdata, sub_type, timeout_nanos) = {
+        let mem_data = memory.data(&caller);
+        let subscription_size = 48;
+        let sub_addr = subscriptions_ptr as usize;
+        if sub_addr + subscription_size > mem_data.len() {
+            eprintln!("poll_oneoff: Subscription out of bounds");
+            return 1;
+        }
+        // Read userdata (u64) from offset 0.
+        let userdata_bytes = &mem_data[sub_addr..sub_addr + 8];
+        let userdata = u64::from_le_bytes(userdata_bytes.try_into().unwrap());
+        // Read the subscription type from offset 8 (u16).
+        let type_bytes = &mem_data[sub_addr + 8..sub_addr + 10];
+        let sub_type = u16::from_le_bytes(type_bytes.try_into().unwrap());
+        // Read the timeout (u64) from offset 16.
+        let timeout_bytes = &mem_data[sub_addr + 16..sub_addr + 24];
+        let timeout_nanos = u64::from_le_bytes(timeout_bytes.try_into().unwrap());
+        (userdata, sub_type, timeout_nanos)
+    };
+
+    let sleep_nanos = if timeout_nanos == 0 { 9_000_000_000 } else { timeout_nanos };
     let sleep_duration = Duration::from_nanos(sleep_nanos);
     println!("poll_oneoff: Sleeping for {:?}", sleep_duration);
     thread::sleep(sleep_duration);
-    println!("poll_oneoff: userdata = {}, type = {}, timeout_nanos = {}", userdata, sub_type, timeout_nanos);
-    
-    
-    
-    // Now write an event result back into WASM memory.
-    // We assume an event struct of 32 bytes.
-    let event_size = 32;
-    let events_addr = events_ptr as usize;
-    let mem_mut = memory.data_mut(&mut caller);
-    if events_addr + event_size > mem_mut.len() {
-        eprintln!("poll_oneoff: Events area out of bounds");
-        return 1;
+    println!(
+        "poll_oneoff: userdata = {}, type = {}, timeout_nanos = {}",
+        userdata, sub_type, timeout_nanos
+    );
+
+    // Now use a new block for the mutable borrow to write the event result.
+    {
+        let event_size = 32;
+        let events_addr = events_ptr as usize;
+        let mem_mut = memory.data_mut(&mut caller);
+        if events_addr + event_size > mem_mut.len() {
+            eprintln!("poll_oneoff: Events area out of bounds");
+            return 1;
+        }
+        // Write userdata.
+        mem_mut[events_addr..events_addr + 8].copy_from_slice(&userdata.to_le_bytes());
+        // Write error (0) as u16.
+        mem_mut[events_addr + 8..events_addr + 10].copy_from_slice(&0u16.to_le_bytes());
+        // Write event type.
+        mem_mut[events_addr + 10..events_addr + 12].copy_from_slice(&sub_type.to_le_bytes());
+        // Zero the remaining bytes.
+        for byte in &mut mem_mut[events_addr + 12..events_addr + event_size] {
+            *byte = 0;
+        }
+        // Write the number of events (1) as a u64.
+        let nevents_addr = nevents_ptr as usize;
+        if nevents_addr + 8 > mem_mut.len() {
+            eprintln!("poll_oneoff: nevents pointer out of bounds");
+            return 1;
+        }
+        mem_mut[nevents_addr..nevents_addr + 8].copy_from_slice(&1u64.to_le_bytes());
     }
-    
-    // Write userdata (copying from the subscription).
-    mem_mut[events_addr..events_addr+8].copy_from_slice(&userdata.to_le_bytes());
-    // Write error (0) as u16 at offset 8.
-    mem_mut[events_addr+8..events_addr+10].copy_from_slice(&0u16.to_le_bytes());
-    // Write event type (using the subscription type) as u16 at offset 10.
-    mem_mut[events_addr+10..events_addr+12].copy_from_slice(&sub_type.to_le_bytes());
-    // Zero the remaining bytes of the event.
-    for byte in &mut mem_mut[events_addr+12..events_addr+event_size] {
-        *byte = 0;
-    }
-    
-    // Write the number of events (1) as a u64 at the address pointed to by nevents_ptr.
-    let nevents_addr = nevents_ptr as usize;
-    if nevents_addr + 8 > mem_mut.len() {
-        eprintln!("poll_oneoff: nevents pointer out of bounds");
-        return 1;
-    }
-    mem_mut[nevents_addr..nevents_addr+8].copy_from_slice(&1u64.to_le_bytes());
-    
     0
 }
 
@@ -226,45 +253,54 @@ pub fn wasi_fd_write(
     let memory = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
         _ => {
-            eprintln!("Failed to find memory export");
+            eprintln!("fd_write: Failed to find memory export");
             return 1;
         }
     };
-    let data = memory.data(&caller);
-    let mut total_written = 0;
-    for i in 0..iovs_len {
-        let iovec_addr = (iovs as usize) + (i as usize) * 8;
-        if iovec_addr + 8 > data.len() {
-            eprintln!("iovec out of bounds");
-            return 1;
-        }
-        let offset_bytes: [u8; 4] = data[iovec_addr..iovec_addr + 4].try_into().unwrap();
-        let len_bytes: [u8; 4] = data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
-        let offset = u32::from_le_bytes(offset_bytes) as usize;
-        let len = u32::from_le_bytes(len_bytes) as usize;
-        if offset + len > data.len() {
-            eprintln!("data slice out of bounds");
-            return 1;
-        }
-        let slice = &data[offset..offset + len];
-        match fd {
-            1 => { io::stdout().write_all(slice).unwrap(); },
-            2 => { io::stderr().write_all(slice).unwrap(); },
-            _ => {
-                eprintln!("fd_write called with unsupported fd: {}", fd);
+
+    // First, use an immutable borrow to read the iovec information.
+    let total_written = {
+        let data = memory.data(&caller);
+        let mut total_written = 0;
+        for i in 0..iovs_len {
+            let iovec_addr = (iovs as usize) + (i as usize) * 8;
+            if iovec_addr + 8 > data.len() {
+                eprintln!("iovec out of bounds");
                 return 1;
             }
+            let offset_bytes: [u8; 4] = data[iovec_addr..iovec_addr + 4].try_into().unwrap();
+            let len_bytes: [u8; 4] = data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
+            let offset = u32::from_le_bytes(offset_bytes) as usize;
+            let len = u32::from_le_bytes(len_bytes) as usize;
+            if offset + len > data.len() {
+                eprintln!("data slice out of bounds");
+                return 1;
+            }
+            let slice = &data[offset..offset + len];
+            match fd {
+                1 => { io::stdout().write_all(slice).unwrap(); },
+                2 => { io::stderr().write_all(slice).unwrap(); },
+                _ => {
+                    eprintln!("fd_write called with unsupported fd: {}", fd);
+                    return 1;
+                }
+            }
+            total_written += len;
         }
-        total_written += len;
+        total_written
+    };
+
+    // Then use a mutable borrow to write the nwritten value back into memory.
+    {
+        let total_written_bytes = (total_written as u32).to_le_bytes();
+        let nwritten_ptr = nwritten as usize;
+        let mem_mut = memory.data_mut(&mut caller);
+        if nwritten_ptr + 4 > mem_mut.len() {
+            eprintln!("nwritten pointer out of bounds");
+            return 1;
+        }
+        mem_mut[nwritten_ptr..nwritten_ptr + 4].copy_from_slice(&total_written_bytes);
     }
-    let total_written_bytes = (total_written as u32).to_le_bytes();
-    let nwritten_ptr = nwritten as usize;
-    let mem_mut = memory.data_mut(&mut caller);
-    if nwritten_ptr + 4 > mem_mut.len() {
-        eprintln!("nwritten pointer out of bounds");
-        return 1;
-    }
-    mem_mut[nwritten_ptr..nwritten_ptr + 4].copy_from_slice(&total_written_bytes);
     0
 }
 

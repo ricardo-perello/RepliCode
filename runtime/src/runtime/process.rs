@@ -2,86 +2,90 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Condvar};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
 use wasmtime::{Engine, Store, Module, Linker};
 
 use crate::wasi_syscalls;
+use crate::runtime::fd_table::FDTable;
 
+/// ProcessState describes the current state of a process.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessState {
-    Running, // Running normally
-    Ready, // Ready to run again
-    Blocked,   // Waiting (yielded)
-    Finished,  // Completed execution
+    Running,
+    Ready,
+    Blocked,
+    Finished,
 }
 
+/// Reasons why a process might block.
 #[derive(Debug, Clone)]
 pub enum BlockReason {
     StdinRead,
-    Timeout { resume_after: Instant }, // or other reasons
+    Timeout { resume_after: std::time::Instant },
 }
 
-// ProcessData is the data stored in the Wasmtime store.
+/// ProcessData is stored inside each Wasmtime store and shared with WASI syscalls.
 #[derive(Clone)]
 pub struct ProcessData {
     pub state: Arc<Mutex<ProcessState>>,
     pub cond: Arc<Condvar>,
     pub block_reason: Arc<Mutex<Option<BlockReason>>>,
+    pub fd_table: Arc<Mutex<FDTable>>,
 }
 
+/// Process encapsulates a running process.
 pub struct Process {
     pub thread: JoinHandle<()>,
     pub data: ProcessData,
 }
 
-/// Spawns a new OS thread that sets up Wasmtime, registers our custom WASI syscalls,
-/// instantiates the module, and calls _start.
-/// Before returning, the main thread waits until the WASM code has performed a blocking action.
+/// Spawns a new process by instantiating a WASM module and running its _start function.
+/// Each process gets its own FD table (with FD 0 reserved for stdin).
 pub fn start_process(path: PathBuf) -> Result<Process> {
-    // Set up the Wasmtime engine and load the module.
     let mut config = wasmtime::Config::new();
     config.consume_fuel(true);
     let engine = Engine::new(&config)?;
     let module = Module::from_file(&engine, &path)?;
-    
-    // Initially, the process is Unblocked.
+
+    // Initialize process state and the FD table.
     let state = Arc::new(Mutex::new(ProcessState::Running));
     let cond = Arc::new(Condvar::new());
     let reason = Arc::new(Mutex::new(None));
-    let process_data = ProcessData { state: state.clone(), cond: cond.clone(),  block_reason: reason};
+    let fd_table = Arc::new(Mutex::new(FDTable::new()));
+    {
+        let mut table = fd_table.lock().unwrap();
+        // Reserve FD 0 for stdin.
+        table.entries[0] = Some(crate::runtime::fd_table::FDEntry {
+            buffer: Vec::new(),
+            read_ptr: 0,
+        });
+    }
+    let process_data = ProcessData {
+        state: state.clone(),
+        cond: cond.clone(),
+        block_reason: reason,
+        fd_table: fd_table,
+    };
 
-    // Clone the process data for the thread.
     let thread_data = process_data.clone();
 
-    // Spawn the OS thread.
+    // Spawn a new OS thread to run the WASM module.
     let thread = thread::spawn(move || {
-        // Create a store with our ProcessData.
         let mut store = Store::new(&engine, thread_data);
         let _ = store.set_fuel(20_000);
-
-        // Create a linker that uses ProcessData.
         let mut linker: Linker<ProcessData> = Linker::new(&engine);
-        // Register our custom WASI syscalls.
         wasi_syscalls::register(&mut linker).expect("Failed to register WASI syscalls");
 
-        // Instantiate the module.
         let instance = linker.instantiate(&mut store, &module)
             .expect("Failed to instantiate module");
-
-        // Retrieve the _start function.
         let start_func = instance
             .get_typed_func::<(), ()>(&mut store, "_start")
             .expect("Missing _start function");
 
-        // Run the WASM code.
-        // When a blocking call is encountered (e.g. in fd_read),
-        // the custom WASI syscall will set state to Blocked and wait.
-        let result = start_func.call(&mut store, ());
-        if let Err(e) = result {
+        if let Err(e) = start_func.call(&mut store, ()) {
             eprintln!("Error executing wasm: {:?}", e);
         }
 
-        // When _start returns (or traps), mark the process as Finished.
+        // When _start returns, mark the process as Finished.
         {
             let mut s = store.data().state.lock().unwrap();
             *s = ProcessState::Finished;
