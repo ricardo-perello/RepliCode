@@ -1,36 +1,41 @@
 use anyhow::Result;
 use std::fs;
 use std::io::{self, Read};
-mod runtime {
-    pub mod process;
-    pub mod scheduler;
-    pub mod fd_table;
-}
+
+// Declare your modules so Rust knows where to find them.
+mod consensus_input;
+mod runtime;
 mod wasi_syscalls;
 
 use runtime::process::start_process;
 use runtime::scheduler::run_scheduler;
-
+use consensus_input::process_consensus_file;
 
 fn main() -> Result<()> {
-    // Folder containing the compiled WASM programs.
+    // Folder containing WASM modules.
     let wasm_folder = "../wasm_programs/build";
     let mut processes = Vec::new();
+    let mut next_id = 1; // Unique process IDs starting from 1
 
-    // Discover all WASM files.
+    // Discover and spawn processes.
     for entry in fs::read_dir(wasm_folder)? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("wasm") {
             println!("Found WASM: {:?}", path);
-            // Spawn the process. In our design, each process
-            // has its own FD table (FD 0 for stdin, etc.).
-            let process = start_process(path)?;
+            // Spawn the process with a unique ID.
+            let process = start_process(path, next_id)?;
+            next_id += 1;
             processes.push(process);
         }
     }
 
-    // Run the round-robin scheduler.
+    // Process consensus input from a binary file.
+    // This file contains records for multiple processes.
+    let consensus_file = "path/to/consensus_input.bin";
+    process_consensus_file(consensus_file, &mut processes)?;
+
+    // Run the scheduler (which will, for example, unblock processes waiting for input).
     run_scheduler(processes)?;
 
     Ok(())

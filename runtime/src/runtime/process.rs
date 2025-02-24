@@ -1,13 +1,13 @@
-use anyhow::Result;
-use std::path::PathBuf;
+// runtime/src/runtime/process.rs
 use std::sync::{Arc, Mutex, Condvar};
-use std::thread::{self, JoinHandle};
+use crate::runtime::fd_table::FDTable;
+use std::thread::JoinHandle;
+use std::time::Instant;
+use anyhow::Result;
 use wasmtime::{Engine, Store, Module, Linker};
 
 use crate::wasi_syscalls;
-use crate::runtime::fd_table::FDTable;
 
-/// ProcessState describes the current state of a process.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessState {
     Running,
@@ -16,14 +16,13 @@ pub enum ProcessState {
     Finished,
 }
 
-/// Reasons why a process might block.
 #[derive(Debug, Clone)]
 pub enum BlockReason {
     StdinRead,
-    Timeout { resume_after: std::time::Instant },
+    Timeout { resume_after: Instant },
 }
 
-/// ProcessData is stored inside each Wasmtime store and shared with WASI syscalls.
+/// ProcessData is stored inside each Wasmtime store.
 #[derive(Clone)]
 pub struct ProcessData {
     pub state: Arc<Mutex<ProcessState>>,
@@ -34,19 +33,19 @@ pub struct ProcessData {
 
 /// Process encapsulates a running process.
 pub struct Process {
+    pub id: u64,  // Unique process ID
     pub thread: JoinHandle<()>,
     pub data: ProcessData,
 }
 
-/// Spawns a new process by instantiating a WASM module and running its _start function.
-/// Each process gets its own FD table (with FD 0 reserved for stdin).
-pub fn start_process(path: PathBuf) -> Result<Process> {
+/// Spawns a new process from a WASM module and assigns it a unique ID.
+pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
     let mut config = wasmtime::Config::new();
     config.consume_fuel(true);
     let engine = Engine::new(&config)?;
     let module = Module::from_file(&engine, &path)?;
 
-    // Initialize process state and the FD table.
+    // Initialize process state and FD table.
     let state = Arc::new(Mutex::new(ProcessState::Running));
     let cond = Arc::new(Condvar::new());
     let reason = Arc::new(Mutex::new(None));
@@ -69,7 +68,7 @@ pub fn start_process(path: PathBuf) -> Result<Process> {
     let thread_data = process_data.clone();
 
     // Spawn a new OS thread to run the WASM module.
-    let thread = thread::spawn(move || {
+    let thread = std::thread::spawn(move || {
         let mut store = Store::new(&engine, thread_data);
         let _ = store.set_fuel(20_000);
         let mut linker: Linker<ProcessData> = Linker::new(&engine);
@@ -85,7 +84,7 @@ pub fn start_process(path: PathBuf) -> Result<Process> {
             eprintln!("Error executing wasm: {:?}", e);
         }
 
-        // When _start returns, mark the process as Finished.
+        // Mark process as Finished.
         {
             let mut s = store.data().state.lock().unwrap();
             *s = ProcessState::Finished;
@@ -93,5 +92,5 @@ pub fn start_process(path: PathBuf) -> Result<Process> {
         store.data().cond.notify_all();
     });
 
-    Ok(Process { thread, data: process_data })
+    Ok(Process { id, thread, data: process_data })
 }

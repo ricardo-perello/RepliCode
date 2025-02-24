@@ -31,119 +31,128 @@ pub fn wasi_fd_read(
     iovs_len: i32,
     nread: i32,
 ) -> i32 {
-    // First, lock the FD table and extract the data to be read.
-    let (data_to_read, bytes_to_advance) = {
-        let process_data = caller.data();
-        let mut table = process_data.fd_table.lock().unwrap();
-        let fd_entry = match table.get_fd_entry_mut(fd) {
-            Some(entry) => entry,
-            None => {
-                eprintln!("fd_read called with invalid FD: {}", fd);
+    loop {
+        // Lock the FD table and try to extract data.
+        let (data_to_read, bytes_to_advance) = {
+            let process_data = caller.data();
+            let mut table = process_data.fd_table.lock().unwrap();
+            let fd_entry = match table.get_fd_entry_mut(fd) {
+                Some(entry) => entry,
+                None => {
+                    eprintln!("fd_read called with invalid FD: {}", fd);
+                    return 1;
+                }
+            };
+
+            // If no data is available, then we want to block.
+            if fd_entry.read_ptr >= fd_entry.buffer.len() {
+                // Drop the lock and wait until input is available.
+                drop(table);
+                // Here, we block by waiting on the condition variable.
+                let mut state_guard = caller.data().state.lock().unwrap();
+                // Wait until notified that something might have changed.
+                // (In our scheduler, when new input arrives, the process’s condition is notified.)
+                state_guard = caller.data().cond.wait(state_guard).unwrap();
+                // Then loop back to re-check the FD table.
+                continue;
+            }
+            // Otherwise, clone available data.
+            let available_data = &fd_entry.buffer[fd_entry.read_ptr..];
+            (available_data.to_vec(), available_data.len())
+        };
+
+        // At this point, data is available, so proceed to copy it into the WASM memory.
+        let memory = match caller.get_export("memory") {
+            Some(Extern::Memory(mem)) => mem,
+            _ => {
+                eprintln!("fd_read: Failed to find memory export");
                 return 1;
             }
         };
 
-        // If no data is available, drop the lock and block the process.
-        if fd_entry.read_ptr >= fd_entry.buffer.len() {
-            drop(table);
-            block_process_for_stdin(&mut caller);
-            return 0;
-        }
-
-        // Clone the available data so the lock can be dropped.
-        let available_data = &fd_entry.buffer[fd_entry.read_ptr..];
-        (available_data.to_vec(), available_data.len())
-    };
-
-    // Now that the FD table lock is gone, get a mutable borrow to the memory.
-    let memory = match caller.get_export("memory") {
-        Some(Extern::Memory(mem)) => mem,
-        _ => {
-            eprintln!("Failed to find memory export");
-            return 1;
-        }
-    };
-
-    // Use a new block to scope the immutable borrow from memory.data(&caller)
-    {
-        let mut total_read = 0;
         {
-            // Borrow memory immutably to iterate over the iovecs.
-            let data = memory.data(&caller);
+            // First, determine how many bytes will be read using the iovecs.
+            let mut total_read = 0;
+            {
+                let data = memory.data(&caller);
+                for i in 0..iovs_len {
+                    let iovec_addr = (iovs as usize) + (i as usize) * 8;
+                    if iovec_addr + 8 > data.len() {
+                        eprintln!("iovec out of bounds");
+                        return 1;
+                    }
+                    let offset_bytes: [u8; 4] =
+                        data[iovec_addr..iovec_addr + 4].try_into().unwrap();
+                    let len_bytes: [u8; 4] =
+                        data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
+                    let offset = u32::from_le_bytes(offset_bytes) as usize;
+                    let len = u32::from_le_bytes(len_bytes) as usize;
+                    if offset + len > data.len() {
+                        eprintln!("data slice out of bounds");
+                        return 1;
+                    }
+                    let to_copy = std::cmp::min(len, data_to_read.len() - total_read);
+                    if to_copy == 0 {
+                        break;
+                    }
+                    total_read += to_copy;
+                    if total_read >= data_to_read.len() {
+                        break;
+                    }
+                }
+            }
+
+            // Now actually write the data into the WASM memory.
+            let data_mut = memory.data_mut(&mut caller);
+            let mut total_read = 0;
             for i in 0..iovs_len {
                 let iovec_addr = (iovs as usize) + (i as usize) * 8;
-                if iovec_addr + 8 > data.len() {
+                if iovec_addr + 8 > data_mut.len() {
                     eprintln!("iovec out of bounds");
                     return 1;
                 }
-                let offset_bytes: [u8; 4] = data[iovec_addr..iovec_addr + 4].try_into().unwrap();
-                let len_bytes: [u8; 4] = data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
+                let offset_bytes: [u8; 4] =
+                    data_mut[iovec_addr..iovec_addr + 4].try_into().unwrap();
+                let len_bytes: [u8; 4] =
+                    data_mut[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
                 let offset = u32::from_le_bytes(offset_bytes) as usize;
                 let len = u32::from_le_bytes(len_bytes) as usize;
-                if offset + len > data.len() {
+                if offset + len > data_mut.len() {
                     eprintln!("data slice out of bounds");
                     return 1;
                 }
-                let to_copy = cmp::min(len, data_to_read.len() - total_read);
+                let to_copy = std::cmp::min(len, data_to_read.len() - total_read);
                 if to_copy == 0 {
                     break;
                 }
-                // The actual copying is done after we get a mutable reference.
-                // Here we just update the total number of bytes to be read.
+                data_mut[offset..offset + to_copy]
+                    .copy_from_slice(&data_to_read[total_read..total_read + to_copy]);
                 total_read += to_copy;
                 if total_read >= data_to_read.len() {
                     break;
                 }
             }
-        }
-
-        // Now borrow memory mutably to actually copy data into the WASM memory.
-        let data_mut = memory.data_mut(&mut caller);
-        let mut total_read = 0;
-        for i in 0..iovs_len {
-            let iovec_addr = (iovs as usize) + (i as usize) * 8;
-            if iovec_addr + 8 > data_mut.len() {
-                eprintln!("iovec out of bounds");
+            // Write the total number of bytes read into memory.
+            let total_read_bytes = (total_read as u32).to_le_bytes();
+            let nread_ptr = nread as usize;
+            if nread_ptr + 4 > data_mut.len() {
+                eprintln!("nread pointer out of bounds");
                 return 1;
             }
-            let offset_bytes: [u8; 4] = data_mut[iovec_addr..iovec_addr + 4].try_into().unwrap();
-            let len_bytes: [u8; 4] = data_mut[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
-            let offset = u32::from_le_bytes(offset_bytes) as usize;
-            let len = u32::from_le_bytes(len_bytes) as usize;
-            if offset + len > data_mut.len() {
-                eprintln!("data slice out of bounds");
-                return 1;
-            }
-            let to_copy = cmp::min(len, data_to_read.len() - total_read);
-            if to_copy == 0 {
-                break;
-            }
-            data_mut[offset..offset + to_copy]
-                .copy_from_slice(&data_to_read[total_read..total_read + to_copy]);
-            total_read += to_copy;
-            if total_read >= data_to_read.len() {
-                break;
-            }
+            data_mut[nread_ptr..nread_ptr + 4].copy_from_slice(&total_read_bytes);
         }
-        // Write the number of bytes read back into WASM memory.
-        let total_read_bytes = (total_read as u32).to_le_bytes();
-        let nread_ptr = nread as usize;
-        if nread_ptr + 4 > data_mut.len() {
-            eprintln!("nread pointer out of bounds");
-            return 1;
-        }
-        data_mut[nread_ptr..nread_ptr + 4].copy_from_slice(&total_read_bytes);
-    }
 
-    // Finally, re-lock the FD table to update the read pointer.
-    {
-        let process_data = caller.data();
-        let mut table = process_data.fd_table.lock().unwrap();
-        let fd_entry = table.get_fd_entry_mut(fd).unwrap();
-        fd_entry.read_ptr += bytes_to_advance;
+        // After reading, update the FD's read pointer.
+        {
+            let process_data = caller.data();
+            let mut table = process_data.fd_table.lock().unwrap();
+            let fd_entry = table.get_fd_entry_mut(fd).unwrap();
+            fd_entry.read_ptr += bytes_to_advance;
+        }
+        return 0;
     }
-    0
 }
+
 
 /// Blocks the process, telling the scheduler we're waiting on stdin.
 fn block_process_for_stdin(caller: &mut Caller<'_, ProcessData>) {
