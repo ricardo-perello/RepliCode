@@ -1,17 +1,13 @@
+// program_b.c
 #include <stdio.h>
 #include <unistd.h>
 
 int main() {
-    printf("Program B: Starting and attempting to read...\n");
-    char buffer[128];
-    // In a real blocking call this would block—but for our simulation,
-    // assume that the WASM shim returns a special value to signal blocking.
-    ssize_t n = read(0, buffer, sizeof(buffer));
-    if (n < 0) {
-        perror("Program B: read");
-        // Return 1 to indicate “blocked”
-        return 1;
-    }
-    printf("Program B: Read %zd bytes: %.*s\n", n, (int)n, buffer);
+    printf("Program B: Before sleep\n");
+    fflush(stdout);
+    // Sleep for 1 second (this should map to a poll_oneoff block in your runtime)
+    sleep(1);
+    printf("Program B: After sleep\n");
+    fflush(stdout);
     return 0;
 }

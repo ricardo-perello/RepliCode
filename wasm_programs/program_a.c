@@ -1,22 +1,28 @@
+// program_a.c
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
 
 int main() {
-    // printf("Program B: Starting and sleeping for 1 second...\n");
-    // sleep(10000);
-    // printf("Program B: Woke up!\n");
-    // return 0;
-    printf("Program A: Starting and attempting to read...\n");
+    printf("Program A: Starting and attempting first read...\n");
+    fflush(stdout);
     char buffer[128];
-    // In a real blocking call this would block—but for our simulation,
-    // assume that the WASM shim returns a special value to signal blocking.
     ssize_t n = read(0, buffer, sizeof(buffer));
     if (n < 0) {
-        perror("Program A: read");
-        // Return 1 to indicate “blocked”
+        perror("Program A: first read");
         return 1;
     }
-    printf("Program A: Read %zd bytes: %.*s\n", n, (int)n, buffer);
+    printf("Program A: First read %zd bytes: %.*s\n", n, (int)n, buffer);
+    fflush(stdout);
+
+    printf("Program A: Attempting second read...\n");
+    fflush(stdout);
+    n = read(0, buffer, sizeof(buffer));
+    if (n < 0) {
+        perror("Program A: second read");
+        return 1;
+    }
+    printf("Program A: Second read %zd bytes: %.*s\n", n, (int)n, buffer);
+    fflush(stdout);
     return 0;
 }
