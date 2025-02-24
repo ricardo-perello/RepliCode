@@ -4,7 +4,7 @@
 
 int main() {
     printf("Program B: Starting and sleeping for 1 second...\n");
-    sleep(1);
+    sleep(10000);
     printf("Program B: Woke up!\n");
     return 0;
 }
