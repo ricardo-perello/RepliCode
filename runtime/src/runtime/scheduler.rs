@@ -1,11 +1,19 @@
 use anyhow::Result;
-use crate::runtime::process::{Process, ProcessState};
+use crate::{consensus_input::process_consensus_file, runtime::process::{Process, ProcessState}};
 use std::time::Instant;
 
 use super::process::BlockReason;
 
 pub fn run_scheduler(mut processes: Vec<Process>) -> Result<()> {
     while !processes.is_empty() {
+        let unblocked = processes.iter().filter(|p| {
+            let state = p.data.state.lock().unwrap();
+            *state != ProcessState::Blocked
+        }).count();
+        if unblocked == 0 {
+            // All processes are blocked.
+            let _ = process_consensus_file("../consensus/consensus_input.bin", &mut processes);
+        }
         let mut still_running = Vec::new();
         for process in processes {
             let state_copy = {

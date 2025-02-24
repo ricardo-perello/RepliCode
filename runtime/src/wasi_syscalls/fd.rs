@@ -48,12 +48,7 @@ pub fn wasi_fd_read(
             if fd_entry.read_ptr >= fd_entry.buffer.len() {
                 // Drop the lock and wait until input is available.
                 drop(table);
-                // Here, we block by waiting on the condition variable.
-                let mut state_guard = caller.data().state.lock().unwrap();
-                // Wait until notified that something might have changed.
-                // (In our scheduler, when new input arrives, the process’s condition is notified.)
-                state_guard = caller.data().cond.wait(state_guard).unwrap();
-                // Then loop back to re-check the FD table.
+                block_process_for_stdin(&mut caller);
                 continue;
             }
             // Otherwise, clone available data.
@@ -164,10 +159,18 @@ fn block_process_for_stdin(caller: &mut Caller<'_, ProcessData>) {
         }
         let mut reason = caller.data().block_reason.lock().unwrap();
         *reason = Some(BlockReason::StdinRead);
+        // Notify the scheduler that we’re now waiting.
+        caller.data().cond.notify_all();
     }
-    // Notify the scheduler.
-    caller.data().cond.notify_all();
+
+    // Now wait until the state changes.
+    let mut state = caller.data().state.lock().unwrap();
+    while *state == ProcessState::Blocked {
+        // This call drops the lock while waiting and reacquires it when notified.
+        state = caller.data().cond.wait(state).unwrap();
+    }
 }
+
 
 use std::thread;
 use std::time::Duration;

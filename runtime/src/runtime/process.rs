@@ -1,5 +1,5 @@
 // runtime/src/runtime/process.rs
-use std::sync::{Arc, Mutex, Condvar};
+use std::{fmt, sync::{Arc, Condvar, Mutex}};
 use crate::runtime::fd_table::FDTable;
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -14,6 +14,15 @@ pub enum ProcessState {
     Ready,
     Blocked,
     Finished,
+}
+
+impl fmt::Display for BlockReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BlockReason::StdinRead => write!(f, "StdinRead"),
+            BlockReason::Timeout { resume_after } => write!(f, "Timeout until {:?}", resume_after),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

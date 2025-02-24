@@ -32,8 +32,9 @@ fn main() -> Result<()> {
 
     // Process consensus input from a binary file.
     // This file contains records for multiple processes.
-    let consensus_file = "../consensus/consensus_input.bin";
-    process_consensus_file(consensus_file, &mut processes)?;
+    // let consensus_file = "../consensus/consensus_input.bin";
+    // process_consensus_file(consensus_file, &mut processes)?;
+    // TODO
 
     // Run the scheduler (which will, for example, unblock processes waiting for input).
     run_scheduler(processes)?;

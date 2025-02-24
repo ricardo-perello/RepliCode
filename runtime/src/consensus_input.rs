@@ -77,6 +77,7 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<Process>) -> 
                     fd_entry.buffer.extend_from_slice(body.as_bytes());
                     // Optionally add a newline as a delimiter.
                     fd_entry.buffer.push(b'\n');
+                    println!("Added input to process {}'s FD {}", process_id, fd);
                 } else {
                     eprintln!("Process {} does not have FD {} open", process_id, fd);
                 }
@@ -89,5 +90,6 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<Process>) -> 
             eprintln!("No process found with ID {}", process_id);
         }
     }
+    println!("Finished processing consensus file");
     Ok(())
 }
