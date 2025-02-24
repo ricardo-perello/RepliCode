@@ -2,6 +2,7 @@ use wasmtime::{Caller, Extern};
 use std::io::{self, Write};
 use std::convert::TryInto;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
+use crate::runtime::clock::GlobalClock;
 
 
 /// Dummy implementation for fd_close: simply logs the call.
@@ -170,12 +171,6 @@ fn block_process_for_stdin(caller: &mut Caller<'_, ProcessData>) {
 }
 
 
-use std::thread;
-use std::time::Duration;
-
-/// Real implementation for poll_oneoff.
-/// This function reads a subscription (assumed to be clock/sleep), extracts its timeout,
-/// sleeps for that duration, and then writes a dummy event back into WASM memory.
 pub fn wasi_poll_oneoff(
     mut caller: Caller<'_, ProcessData>,
     subscriptions_ptr: i32,
@@ -183,7 +178,7 @@ pub fn wasi_poll_oneoff(
     nsubscriptions: i32,
     nevents_ptr: i32,
 ) -> i32 {
-    let _ = nsubscriptions;
+    // Get the memory export.
     let memory = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
         _ => {
@@ -192,37 +187,44 @@ pub fn wasi_poll_oneoff(
         }
     };
 
-    // Use a block to scope the immutable borrow for reading the subscription.
-    let (userdata, sub_type, timeout_nanos) = {
-        let mem_data = memory.data(&caller);
-        let subscription_size = 48;
-        let sub_addr = subscriptions_ptr as usize;
-        if sub_addr + subscription_size > mem_data.len() {
-            eprintln!("poll_oneoff: Subscription out of bounds");
-            return 1;
-        }
-        // Read userdata (u64) from offset 0.
-        let userdata_bytes = &mem_data[sub_addr..sub_addr + 8];
-        let userdata = u64::from_le_bytes(userdata_bytes.try_into().unwrap());
-        // Read the subscription type from offset 8 (u16).
-        let type_bytes = &mem_data[sub_addr + 8..sub_addr + 10];
-        let sub_type = u16::from_le_bytes(type_bytes.try_into().unwrap());
-        // Read the timeout (u64) from offset 16.
-        let timeout_bytes = &mem_data[sub_addr + 16..sub_addr + 24];
-        let timeout_nanos = u64::from_le_bytes(timeout_bytes.try_into().unwrap());
-        (userdata, sub_type, timeout_nanos)
-    };
+    // Read subscription data (assuming a single subscription for simplicity).
+    let mem_data = memory.data(&caller);
+    let subscription_size = 48;
+    let sub_addr = subscriptions_ptr as usize;
+    if sub_addr + subscription_size > mem_data.len() {
+        eprintln!("poll_oneoff: Subscription out of bounds");
+        return 1;
+    }
+    // Extract userdata (u64), type (u16) and timeout (u64) from the subscription.
+    let userdata_bytes = &mem_data[sub_addr..sub_addr + 8];
+    let userdata = u64::from_le_bytes(userdata_bytes.try_into().unwrap());
+    let type_bytes = &mem_data[sub_addr + 8..sub_addr + 10];
+    let sub_type = u16::from_le_bytes(type_bytes.try_into().unwrap());
+    let timeout_bytes = &mem_data[sub_addr + 16..sub_addr + 24];
+    let timeout_nanos = u64::from_le_bytes(timeout_bytes.try_into().unwrap());
 
+    // Instead of sleeping, set the process to block until the clock reaches wake_time.
     let sleep_nanos = if timeout_nanos == 0 { 9_000_000_000 } else { timeout_nanos };
-    let sleep_duration = Duration::from_nanos(sleep_nanos);
-    println!("poll_oneoff: Sleeping for {:?}", sleep_duration);
-    thread::sleep(sleep_duration);
-    println!(
-        "poll_oneoff: userdata = {}, type = {}, timeout_nanos = {}",
-        userdata, sub_type, timeout_nanos
-    );
+    let wake_time = GlobalClock::now() + sleep_nanos;
 
-    // Now use a new block for the mutable borrow to write the event result.
+    {
+        let process_data = caller.data();
+        let mut state = process_data.state.lock().unwrap();
+        let mut reason = process_data.block_reason.lock().unwrap();
+        *reason = Some(BlockReason::Timeout { resume_after: wake_time });
+        *state = ProcessState::Blocked;
+        process_data.cond.notify_all();
+    }
+
+    // Wait until the scheduler unblocks the process.
+    {
+        let mut state = caller.data().state.lock().unwrap();
+        while *state == ProcessState::Blocked {
+            state = caller.data().cond.wait(state).unwrap();
+        }
+    } // The lock on state is dropped here.
+
+    // Once unblocked, write a dummy event back to WASM memory.
     {
         let event_size = 32;
         let events_addr = events_ptr as usize;
@@ -233,15 +235,15 @@ pub fn wasi_poll_oneoff(
         }
         // Write userdata.
         mem_mut[events_addr..events_addr + 8].copy_from_slice(&userdata.to_le_bytes());
-        // Write error (0) as u16.
+        // Write error code (0 for success) as u16.
         mem_mut[events_addr + 8..events_addr + 10].copy_from_slice(&0u16.to_le_bytes());
-        // Write event type.
+        // Write the event type.
         mem_mut[events_addr + 10..events_addr + 12].copy_from_slice(&sub_type.to_le_bytes());
         // Zero the remaining bytes.
         for byte in &mut mem_mut[events_addr + 12..events_addr + event_size] {
             *byte = 0;
         }
-        // Write the number of events (1) as a u64.
+        // Write the number of events (1) to nevents_ptr.
         let nevents_addr = nevents_ptr as usize;
         if nevents_addr + 8 > mem_mut.len() {
             eprintln!("poll_oneoff: nevents pointer out of bounds");
@@ -251,6 +253,7 @@ pub fn wasi_poll_oneoff(
     }
     0
 }
+
 
 /// Implementation for fd_write: writes to stdout/stderr.
 pub fn wasi_fd_write(

@@ -2,10 +2,9 @@
 use std::{fmt, sync::{Arc, Condvar, Mutex}};
 use crate::runtime::fd_table::FDTable;
 use std::thread::JoinHandle;
-use std::time::Instant;
 use anyhow::Result;
 use wasmtime::{Engine, Store, Module, Linker};
-
+use crate::runtime::clock::GlobalClock;
 use crate::wasi_syscalls;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -28,7 +27,7 @@ impl fmt::Display for BlockReason {
 #[derive(Debug, Clone)]
 pub enum BlockReason {
     StdinRead,
-    Timeout { resume_after: Instant },
+    Timeout { resume_after: u64 },
 }
 
 /// ProcessData is stored inside each Wasmtime store.

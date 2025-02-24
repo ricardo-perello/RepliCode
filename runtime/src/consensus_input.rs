@@ -1,43 +1,54 @@
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use byteorder::{LittleEndian, ReadBytesExt};
 use anyhow::Result;
-
 use crate::runtime::process::Process;
+use crate::runtime::clock::GlobalClock;
 
-/// Reads a consensus input file and updates the FD buffers for the appropriate processes.
-///
-/// The file is expected to contain a series of records in binary format:
-/// [ process_id: u64 ][ msg_size: u16 ][ msg: [u8; msg_size] ]
-///
-/// The message is assumed to be a UTF-8 encoded string with the following format:
-/// "fd:<number>,body:<data>"
-/// For example: "fd:0,body:Hello World"
+// Global read offset.
+use std::sync::atomic::{AtomicU64, Ordering};
+static READ_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+/// Reads a consensus input file from the last read offset and updates the FD buffers
+/// or global clock based on the records found.
+/// 
+/// Record format:
+///   [ process_id: u64 ][ msg_size: u16 ][ msg: [u8; msg_size] ]
+/// 
+/// For FD updates, the message is: "fd:<number>,body:<data>"
+/// For clock updates, the record must have process_id==0 and the message is: "clock:<delta>"
 pub fn process_consensus_file(file_path: &str, processes: &mut Vec<Process>) -> Result<()> {
-    let file = File::open(file_path)?;
+    // Open the file and seek to the last read offset.
+    let mut file = File::open(file_path)?;
+    let offset = READ_OFFSET.load(Ordering::SeqCst);
+    file.seek(SeekFrom::Start(offset))?;
     let mut reader = BufReader::new(file);
 
     loop {
-        // Read process_id (u64)
+        // Attempt to read the process_id.
         let process_id = match reader.read_u64::<LittleEndian>() {
             Ok(pid) => pid,
-            Err(_) => break, // EOF reached or error encountered.
+            Err(_) => break, // EOF or error encountered.
         };
 
-        // Read message size (u16)
+        // Read the message size.
         let msg_size = match reader.read_u16::<LittleEndian>() {
             Ok(sz) => sz,
             Err(_) => break,
         };
 
-        // Read message bytes
+        // Read the message bytes.
         let mut msg_buf = vec![0u8; msg_size as usize];
         if let Err(e) = reader.read_exact(&mut msg_buf) {
             eprintln!("Failed to read message: {}", e);
             break;
         }
 
-        // Interpret the message as a UTF-8 string.
+        // Update our global offset after successfully reading a record.
+        let new_offset = reader.stream_position()?;
+        READ_OFFSET.store(new_offset, Ordering::SeqCst);
+
+        // Interpret the message as UTF-8.
         let msg_str = match String::from_utf8(msg_buf) {
             Ok(s) => s,
             Err(e) => {
@@ -46,7 +57,24 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<Process>) -> 
             }
         };
 
-        // Parse the message.
+        // Process a clock update if process_id is 0.
+        if process_id == 0 {
+            // Expected format: "clock:<delta>"
+            if let Some(delta_str) = msg_str.strip_prefix("clock:") {
+                match delta_str.trim().parse::<u64>() {
+                    Ok(delta) => {
+                        GlobalClock::increment(delta);
+                        println!("Global clock incremented by {}", delta);
+                    }
+                    Err(e) => eprintln!("Invalid clock increment: {}", e),
+                }
+            } else {
+                eprintln!("Invalid clock message format: {}", msg_str);
+            }
+            continue; // Move on to the next record.
+        }
+
+        // Otherwise, process it as an FD message.
         // Expected format: "fd:<number>,body:<data>"
         let parts: Vec<&str> = msg_str.split(",body:").collect();
         if parts.len() != 2 {
@@ -67,7 +95,7 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<Process>) -> 
         };
         let body = parts[1].trim();
 
-        // Update the corresponding process's FD table.
+        // Find the target process and update its FD.
         let mut found = false;
         for process in processes.iter_mut() {
             if process.id == process_id {
@@ -90,6 +118,6 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<Process>) -> 
             eprintln!("No process found with ID {}", process_id);
         }
     }
-    println!("Finished processing consensus file");
+    //println!("Finished processing consensus file");
     Ok(())
 }

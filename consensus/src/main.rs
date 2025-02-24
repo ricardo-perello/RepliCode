@@ -7,7 +7,10 @@ fn main() -> io::Result<()> {
     eprintln!("----------------------");
     eprintln!("This tool creates binary records with the following layout:");
     eprintln!("  [ process_id: u64 ][ msg_size: u16 ][ msg: [u8; msg_size] ]");
-    eprintln!("The message must include all necessary info (e.g., \"fd:0,body:Hello World!\")");
+    eprintln!("For FD updates, use a valid process id (>=1) and a message like:");
+    eprintln!("  \"fd:0,body:Hello World!\"");
+    eprintln!("For global clock updates, use process id 0 and a message like:");
+    eprintln!("  \"clock:100000\"  (to increment the clock by 100000 units)");
     eprintln!("Type 'exit' at the process ID prompt to quit.\n");
 
     // We'll write binary records to stdout.
@@ -32,7 +35,7 @@ fn main() -> io::Result<()> {
             }
         };
 
-        eprint!("Enter message (include FD info, e.g., \"fd:0,body:Hello World!\"): ");
+        eprint!("Enter message: ");
         io::stderr().flush()?;
         let mut message = String::new();
         io::stdin().read_line(&mut message)?;
