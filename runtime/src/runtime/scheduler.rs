@@ -1,8 +1,7 @@
 use anyhow::Result;
 use crate::runtime::process::{Process, ProcessState};
 use crate::wasi_syscalls::fd::GLOBAL_INPUT;
-use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::process::BlockReason;
 

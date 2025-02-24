@@ -187,7 +187,7 @@ pub fn wasi_poll_oneoff(
     // We assume an event struct of 32 bytes.
     let event_size = 32;
     let events_addr = events_ptr as usize;
-    let mut mem_mut = memory.data_mut(&mut caller);
+    let mem_mut = memory.data_mut(&mut caller);
     if events_addr + event_size > mem_mut.len() {
         eprintln!("poll_oneoff: Events area out of bounds");
         return 1;
