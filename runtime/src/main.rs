@@ -1,6 +1,5 @@
 use anyhow::Result;
 use std::fs;
-use std::io::{self, Read};
 
 // Declare your modules so Rust knows where to find them.
 mod consensus_input;
@@ -9,7 +8,6 @@ mod wasi_syscalls;
 
 use runtime::process::start_process;
 use runtime::scheduler::run_scheduler;
-use consensus_input::process_consensus_file;
 
 fn main() -> Result<()> {
     // Folder containing WASM modules.

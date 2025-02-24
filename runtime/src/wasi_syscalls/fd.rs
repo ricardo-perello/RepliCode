@@ -2,9 +2,7 @@ use wasmtime::{Caller, Extern};
 use std::io::{self, Write};
 use std::convert::TryInto;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
-use std::cmp;
-use once_cell::sync::Lazy;
-use std::sync::{Mutex, Condvar};
+
 
 /// Dummy implementation for fd_close: simply logs the call.
 pub fn wasi_fd_close(_caller: Caller<'_, ProcessData>, fd: i32) -> i32 {
