@@ -22,7 +22,7 @@ fn main() -> Result<()> {
         if path.extension().and_then(|s| s.to_str()) == Some("wasm") {
             println!("Found WASM: {:?}", path);
             // Spawn the process with a unique ID.
-            let process = start_process(path, next_id)?;
+            let process = start_process(path, next_id)?; //TODO sometimes spawns the thread before all the wasms are found
             next_id += 1;
             processes.push(process);
         }
