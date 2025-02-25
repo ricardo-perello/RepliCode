@@ -117,6 +117,6 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<Process>) -> 
             eprintln!("No process found with ID {}", process_id);
         }
     }
-    println!("Finished processing consensus file for one batch");
+    //println!("Finished processing consensus file for one batch");
     Ok(())
 }

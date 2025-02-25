@@ -200,11 +200,12 @@ pub fn wasi_poll_oneoff(
     let userdata = u64::from_le_bytes(userdata_bytes.try_into().unwrap());
     let type_bytes = &mem_data[sub_addr + 8..sub_addr + 10];
     let sub_type = u16::from_le_bytes(type_bytes.try_into().unwrap());
-    let timeout_bytes = &mem_data[sub_addr + 16..sub_addr + 24];
+    // Instead of sub_addr + 16..sub_addr + 24
+    let timeout_bytes = &mem_data[sub_addr + 24..sub_addr + 32];
     let timeout_nanos = u64::from_le_bytes(timeout_bytes.try_into().unwrap());
 
     // Instead of sleeping, set the process to block until the clock reaches wake_time.
-    let sleep_nanos = if timeout_nanos == 0 { 11_000 } else { timeout_nanos };
+    let sleep_nanos = if timeout_nanos == 0 { 1_000_000_000 } else { timeout_nanos };
     println!("poll_oneoff: Blocking process for {} nanoseconds", sleep_nanos);
     let wake_time = GlobalClock::now() + sleep_nanos;
 
