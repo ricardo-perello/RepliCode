@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::fs::OpenOptions;
 use byteorder::{LittleEndian, WriteBytesExt};
 
 fn main() -> io::Result<()> {
@@ -13,9 +14,13 @@ fn main() -> io::Result<()> {
     eprintln!("  \"clock:100000\"  (to increment the clock by 100000 units)");
     eprintln!("Type 'exit' at the process ID prompt to quit.\n");
 
-    // We'll write binary records to stdout.
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
+    // Open the correct file (using append mode so records accumulate).
+    // Adjust the file path as needed.
+    let file_path = "consensus_input.bin";
+    let mut output = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(file_path)?;
 
     loop {
         eprint!("Enter Process ID: ");
@@ -53,7 +58,7 @@ fn main() -> io::Result<()> {
         }
         let msg_size_u16 = msg_size as u16;
 
-        // Write the binary record to stdout:
+        // Write the binary record to the file:
         // [ process_id: u64 ][ msg_size: u16 ][ msg: [u8; msg_size] ]
         output.write_u64::<LittleEndian>(pid)?;
         output.write_u16::<LittleEndian>(msg_size_u16)?;
