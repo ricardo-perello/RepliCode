@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     // This file contains records for multiple processes.
     // let consensus_file = "../consensus/consensus_input.bin";
     // process_consensus_file(consensus_file, &mut processes)?;
-    // TODO
+    // TODO uncomment this when we want efficiency so first batch is already read at the start
 
     // Run the scheduler (which will, for example, unblock processes waiting for input).
     run_scheduler(processes)?;
