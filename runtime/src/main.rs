@@ -1,41 +1,46 @@
 use anyhow::Result;
-use std::fs;
-
-// Declare your modules so Rust knows where to find them.
+// Declare modules so Rust knows where to find them.
 mod consensus_input;
 mod runtime;
 mod wasi_syscalls;
 
-use runtime::process::start_process;
-use runtime::scheduler::run_scheduler;
-
 fn main() -> Result<()> {
-    // Folder containing WASM modules.
-    let wasm_folder = "../wasm_programs/build";
-    let mut processes = Vec::new();
-    let mut next_id = 1; // Unique process IDs starting from 1
+    // Determine execution mode: benchmark, hybrid, or interactive.
+    let args: Vec<String> = std::env::args().collect();
+    let mode = if args.len() > 1 { &args[1] } else { "benchmark" };
+    println!("Running in {} mode", mode);
 
-    // Discover and spawn processes.
-    for entry in fs::read_dir(wasm_folder)? {
+    // Spawn processes from WASM modules.
+    let mut processes = Vec::new();
+    let wasm_folder = "wasm_programs/build";
+    let mut next_id = 1;
+    for entry in std::fs::read_dir(wasm_folder)? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("wasm") {
             println!("Found WASM: {:?}", path);
-            // Spawn the process with a unique ID.
-            let process = start_process(path, next_id)?; //TODO sometimes spawns the thread before all the wasms are found
+            let process = runtime::process::start_process(path, next_id)?;
             next_id += 1;
             processes.push(process);
         }
     }
 
-    // Process consensus input from a binary file.
-    // This file contains records for multiple processes.
-    // let consensus_file = "../consensus/consensus_input.bin";
-    // process_consensus_file(consensus_file, &mut processes)?;
-    // TODO
-
-    // Run the scheduler (which will, for example, unblock processes waiting for input).
-    run_scheduler(processes)?;
+    match mode {
+        "benchmark" => {
+            let consensus_file = "consensus/consensus_input.bin";
+            runtime::scheduler::run_scheduler_with_file(processes, consensus_file)?;
+        },
+        "interactive" => {
+            println!("Interactive mode: reading from standard input.");
+            // Instead of opening a named pipe, read from standard input.
+            let stdin = std::io::stdin();
+            let mut consensus_pipe = stdin.lock();
+            runtime::scheduler::run_scheduler_interactive(processes, &mut consensus_pipe)?;
+        },
+        _ => {
+            eprintln!("Unknown mode: {}. Use benchmark, hybrid, or interactive.", mode);
+        }
+    }
 
     Ok(())
 }

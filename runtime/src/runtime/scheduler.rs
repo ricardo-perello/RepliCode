@@ -1,19 +1,30 @@
 use anyhow::Result;
-use crate::{consensus_input::process_consensus_file, runtime::process::{Process, ProcessState}};
-use crate::runtime::clock::GlobalClock;
+use crate::{
+    consensus_input::process_consensus_file,
+    runtime::process::{Process, ProcessState, BlockReason},
+    runtime::clock::GlobalClock,
+};
+use std::io::Read;
 
-use super::process::BlockReason;
-
-pub fn run_scheduler(mut processes: Vec<Process>) -> Result<()> {
+/// The main scheduler loop now accepts a consensus input closure that only
+/// needs a mutable reference to the process list.
+pub fn run_scheduler<F>(mut processes: Vec<Process>, mut consensus_input: F) -> Result<()>
+where
+    F: FnMut(&mut Vec<Process>) -> Result<()>,
+{
     while !processes.is_empty() {
+        // Count the processes that are not blocked.
         let unblocked = processes.iter().filter(|p| {
             let state = p.data.state.lock().unwrap();
             *state != ProcessState::Blocked
         }).count();
+
         if unblocked == 0 {
             // All processes are blocked.
-            let _ = process_consensus_file("../consensus/consensus_input.bin", &mut processes);
+            // Process the next batch of consensus input.
+            consensus_input(&mut processes)?;
         }
+
         let mut still_running = Vec::new();
         for process in processes {
             let state_copy = {
@@ -22,6 +33,7 @@ pub fn run_scheduler(mut processes: Vec<Process>) -> Result<()> {
             };
             match state_copy {
                 ProcessState::Finished => {
+                    // Wait for the process thread to complete.
                     let _ = process.thread.join();
                 }
                 ProcessState::Blocked => {
@@ -30,11 +42,11 @@ pub fn run_scheduler(mut processes: Vec<Process>) -> Result<()> {
                         reason_guard.clone()
                     };
 
-                    // Instead of checking a global buffer, inspect the process's FD table.
+                    // If the process is blocked on stdin, check if there's new input.
                     if let Some(BlockReason::StdinRead) = reason {
                         let fd_has_input = {
                             let fd_table = process.data.fd_table.lock().unwrap();
-                            fd_table.has_pending_input(0)  // FD 0 (stdin) check
+                            fd_table.has_pending_input(0) // FD 0 (stdin) check
                         };
 
                         if fd_has_input {
@@ -71,4 +83,25 @@ pub fn run_scheduler(mut processes: Vec<Process>) -> Result<()> {
         processes = still_running;
     }
     Ok(())
+}
+
+/// Wrapper for benchmark mode using a file as consensus input.
+pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) -> Result<()> {
+    run_scheduler(processes, |processes| {
+        // Use the existing process_consensus_file function.
+        process_consensus_file(consensus_file, processes)
+    })
+}
+
+/// Wrapper for interactive mode using a live consensus pipe/socket.
+pub fn run_scheduler_interactive<R: Read>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
+    run_scheduler(processes, |processes| {
+        let mut buffer = [0u8; 1024];
+        let n = consensus_pipe.read(&mut buffer)?;
+        if n > 0 {
+            println!("Received {} bytes from consensus pipe", n);
+            // Here you would process the input from the pipe as needed.
+        }
+        Ok(())
+    })
 }
