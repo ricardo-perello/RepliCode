@@ -4,7 +4,6 @@ use crate::runtime::fd_table::FDTable;
 use std::thread::JoinHandle;
 use anyhow::Result;
 use wasmtime::{Engine, Store, Module, Linker};
-use crate::runtime::clock::GlobalClock;
 use crate::wasi_syscalls;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,7 +77,7 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
     // Spawn a new OS thread to run the WASM module.
     let thread = std::thread::spawn(move || {
         let mut store = Store::new(&engine, thread_data);
-        let _ = store.set_fuel(20_000);
+        let _ = store.set_fuel(2_000_000);
         let mut linker: Linker<ProcessData> = Linker::new(&engine);
         wasi_syscalls::register(&mut linker).expect("Failed to register WASI syscalls");
 
