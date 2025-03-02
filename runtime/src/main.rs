@@ -25,17 +25,14 @@ fn main() -> Result<()> {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("wasm") {
             info!("Runtime: Found WASM: {:?}", path);
-            let process = runtime::process::start_process(path, next_id)?;
-            info!("Runtime: Started process with pid {}", next_id);
-            next_id += 1;
-            processes.push(process);
-        }
-            println!("Found WASM: {:?}", path);
             wasm_files.push(path);
+        }
+            
     }
     
     for path in wasm_files{
         let process = runtime::process::start_process(path, next_id)?;
+        info!("Runtime: Started process with pid {}", next_id);
         next_id += 1;
         processes.push(process);
     }
