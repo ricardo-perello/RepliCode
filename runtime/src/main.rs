@@ -32,8 +32,8 @@ fn main() -> Result<()> {
         }
             println!("Found WASM: {:?}", path);
             wasm_files.push(path);
-        }
     }
+    
     for path in wasm_files{
         let process = runtime::process::start_process(path, next_id)?;
         next_id += 1;
