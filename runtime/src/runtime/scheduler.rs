@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crate::{
-    consensus_input::process_consensus_file,
+    consensus_input::{process_consensus_file, process_consensus_pipe},
     runtime::process::{Process, ProcessState, BlockReason},
     runtime::clock::GlobalClock,
 };
@@ -111,7 +111,6 @@ where
 }
 
 
-/// Wrapper for benchmark mode using a file as consensus input.
 pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) -> Result<()> {
     run_scheduler(processes, |processes| {
         // Use the existing process_consensus_file function.
@@ -122,12 +121,6 @@ pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) ->
 /// Wrapper for interactive mode using a live consensus pipe/socket.
 pub fn run_scheduler_interactive<R: Read>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
     run_scheduler(processes, |processes| {
-        let mut buffer = [0u8; 1024];
-        let n = consensus_pipe.read(&mut buffer)?;
-        if n > 0 {
-            println!("Received {} bytes from consensus pipe", n);
-            // Here you would process the input from the pipe as needed.
-        }
-        Ok(())
+        process_consensus_pipe(consensus_pipe, processes)
     })
 }

@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write, Read, BufReader};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -29,8 +29,8 @@ fn main() -> io::Result<()> {
                 eprintln!("Hybrid mode requires an input file path as the second argument.");
                 std::process::exit(1);
             }
-            let file_path = &args[2];
-            run_hybrid_mode(file_path)
+            let input_file_path = &args[2];
+            run_hybrid_mode(input_file_path)
         },
         _ => {
             eprintln!("Unknown mode: {}. Use benchmark, interactive, or hybrid.", mode);
@@ -41,8 +41,12 @@ fn main() -> io::Result<()> {
 
 /// Benchmark mode: each record is written immediately as the user enters it.
 fn run_benchmark_mode() -> io::Result<()> {
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
+    // Open the consensus file in append mode.
+    let file_path = "consensus/consensus_input.bin";
+    let mut output = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file_path)?;
 
     loop {
         eprint!("Enter Process ID: ");
@@ -80,6 +84,7 @@ fn run_benchmark_mode() -> io::Result<()> {
         let msg_size_u16 = msg_size as u16;
 
         // Write the binary record immediately.
+        // [ process_id: u64 ][ msg_size: u16 ][ msg: [u8; msg_size] ]
         output.write_u64::<LittleEndian>(pid)?;
         output.write_u16::<LittleEndian>(msg_size_u16)?;
         output.write_all(message_bytes)?;
@@ -98,20 +103,25 @@ fn run_interactive_mode() -> io::Result<()> {
     let buffer = Arc::new(Mutex::new(Vec::new()));
     let buffer_clone = Arc::clone(&buffer);
     let flush_interval = Duration::from_secs(5);
+    let file_path = "consensus/consensus_input.bin";
 
     // Spawn a thread to flush the buffer periodically.
     let flush_thread = thread::spawn(move || {
-        let stdout = io::stdout();
-        let mut out = stdout.lock();
+        // Open the consensus file once in append mode.
+        let mut out = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file_path)
+            .expect("Failed to open consensus file in flush thread");
         loop {
             thread::sleep(flush_interval);
             let mut buf = buffer_clone.lock().unwrap();
             if !buf.is_empty() {
                 if let Err(e) = out.write_all(&buf) {
-                    eprintln!("Error writing batch to stdout: {}", e);
+                    eprintln!("Error writing batch to file: {}", e);
                 }
                 if let Err(e) = out.flush() {
-                    eprintln!("Error flushing stdout: {}", e);
+                    eprintln!("Error flushing file: {}", e);
                 }
                 buf.clear();
             }
@@ -171,8 +181,10 @@ fn run_interactive_mode() -> io::Result<()> {
     eprintln!("Exiting Interactive Mode.");
     // Flush any remaining data.
     {
-        let stdout = io::stdout();
-        let mut out = stdout.lock();
+        let mut out = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("consensus/consensus_input.bin")?;
         let mut buf = buffer.lock().unwrap();
         if !buf.is_empty() {
             out.write_all(&buf)?;
@@ -182,18 +194,23 @@ fn run_interactive_mode() -> io::Result<()> {
     }
     // In a complete application we would signal the flush thread to stop.
     // Here we simply exit.
-    // At the end of run_interactive_mode()
     flush_thread.join().unwrap_or_else(|_| ());
     Ok(())
 }
 
-/// Hybrid mode: reads a file of batches and sends each batch through stdout.
+/// Hybrid mode: reads a file of batches and appends each batch to the same consensus file.
 /// A batch ends when a clock record is encountered (process_id == 0 and message starts with "clock:").
-fn run_hybrid_mode(file_path: &str) -> io::Result<()> {
-    let file = File::open(file_path)?;
+fn run_hybrid_mode(input_file_path: &str) -> io::Result<()> {
+    // Open the provided input file for reading.
+    let file = File::open(input_file_path)?;
     let mut reader = BufReader::new(file);
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
+
+    // Open the consensus file for appending output.
+    let out_file_path = "consensus/consensus_input.bin";
+    let mut out = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(out_file_path)?;
 
     let mut batch_buffer = Vec::new();
 
@@ -219,17 +236,20 @@ fn run_hybrid_mode(file_path: &str) -> io::Result<()> {
         record.write_u64::<LittleEndian>(pid)?;
         record.write_u16::<LittleEndian>(msg_size as u16)?;
         record.write_all(&msg_buf)?;
-        
+
         // Append the record to the current batch.
         batch_buffer.extend(record);
 
         // Check if this is a clock record marking the end of a batch.
         if pid == 0 {
-            // Optionally, you might want to process the clock message here.
             let msg_str = String::from_utf8_lossy(&msg_buf);
             eprintln!("Clock record encountered: {}", msg_str);
-            // Send the current batch through stdout.
-            thread::sleep(Duration::from_secs(5)); // Simulate processing time.
+
+            // If you want to parse a clock delta and sleep, do it here.
+            // For demonstration, we just sleep for 5 seconds:
+            thread::sleep(Duration::from_secs(5));
+
+            // After "sleeping," send the current batch to the consensus file.
             if !batch_buffer.is_empty() {
                 out.write_all(&batch_buffer)?;
                 out.flush()?;
@@ -238,6 +258,7 @@ fn run_hybrid_mode(file_path: &str) -> io::Result<()> {
             }
         }
     }
+
     // Flush any remaining records as a final batch.
     if !batch_buffer.is_empty() {
         out.write_all(&batch_buffer)?;
