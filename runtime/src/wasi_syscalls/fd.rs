@@ -187,33 +187,50 @@ pub fn wasi_poll_oneoff(
         }
     };
 
-    // Read subscription data (assuming a single subscription for simplicity).
     let mem_data = memory.data(&caller);
     let subscription_size = 48;
-    let sub_addr = subscriptions_ptr as usize;
-    if sub_addr + subscription_size > mem_data.len() {
-        eprintln!("poll_oneoff: Subscription out of bounds");
+    let nsubs = nsubscriptions as usize;
+    if (subscriptions_ptr as usize) + nsubs * subscription_size > mem_data.len() {
+        eprintln!("poll_oneoff: Subscription array out of bounds");
         return 1;
     }
-    // Extract userdata (u64), type (u16) and timeout (u64) from the subscription.
-    let userdata_bytes = &mem_data[sub_addr..sub_addr + 8];
-    let userdata = u64::from_le_bytes(userdata_bytes.try_into().unwrap());
-    let type_bytes = &mem_data[sub_addr + 8..sub_addr + 10];
-    let sub_type = u16::from_le_bytes(type_bytes.try_into().unwrap());
-    // Instead of sub_addr + 16..sub_addr + 24
-    let timeout_bytes = &mem_data[sub_addr + 24..sub_addr + 32];
-    let timeout_nanos = u64::from_le_bytes(timeout_bytes.try_into().unwrap());
 
-    // Instead of sleeping, set the process to block until the clock reaches wake_time.
-    let sleep_nanos = if timeout_nanos == 0 { 1_000_000_000 } else { timeout_nanos };
-    println!("poll_oneoff: Blocking process for {} nanoseconds", sleep_nanos);
-    let wake_time = GlobalClock::now() + sleep_nanos;
+    // For each subscription, extract its parameters and compute the wake time.
+    let now = GlobalClock::now();
+    let mut subscriptions = Vec::with_capacity(nsubs);
+    let mut earliest_wake_time = u64::MAX;
+    for i in 0..nsubs {
+        let sub_offset = (subscriptions_ptr as usize) + i * subscription_size;
+        // Read userdata (u64) from offset 0.
+        let userdata_bytes = &mem_data[sub_offset..sub_offset + 8];
+        let userdata = u64::from_le_bytes(userdata_bytes.try_into().unwrap());
+        // Read type (u16) from offset 8.
+        let type_bytes = &mem_data[sub_offset + 8..sub_offset + 10];
+        let sub_type = u16::from_le_bytes(type_bytes.try_into().unwrap());
+        // Read timeout (u64) from offset 24.
+        let timeout_bytes = &mem_data[sub_offset + 24..sub_offset + 32];
+        let timeout_nanos = u64::from_le_bytes(timeout_bytes.try_into().unwrap());
 
+        // Use a default of 1 second if timeout is 0.
+        let sleep_nanos = if timeout_nanos == 0 { 1_000_000_000 } else { timeout_nanos };
+        let wake_time = now + sleep_nanos;
+        if wake_time < earliest_wake_time {
+            earliest_wake_time = wake_time;
+        }
+        subscriptions.push((userdata, sub_type, wake_time));
+    }
+
+    println!(
+        "poll_oneoff: Blocking process until earliest wake time: {} (current: {})",
+        earliest_wake_time, now
+    );
+
+    // Block the process until the earliest wake time.
     {
         let process_data = caller.data();
         let mut state = process_data.state.lock().unwrap();
         let mut reason = process_data.block_reason.lock().unwrap();
-        *reason = Some(BlockReason::Timeout { resume_after: wake_time });
+        *reason = Some(BlockReason::Timeout { resume_after: earliest_wake_time });
         *state = ProcessState::Blocked;
         process_data.cond.notify_all();
     }
@@ -224,34 +241,43 @@ pub fn wasi_poll_oneoff(
         while *state == ProcessState::Blocked {
             state = caller.data().cond.wait(state).unwrap();
         }
-    } // The lock on state is dropped here.
+    } // Lock on state is dropped here.
 
-    // Once unblocked, write a dummy event back to WASM memory.
+    // After unblocking, check which subscriptions have reached their wake time.
+    let current_time = GlobalClock::now();
+    let mut num_events = 0;
+    let event_size = 32;
+    let events_addr = events_ptr as usize;
     {
-        let event_size = 32;
-        let events_addr = events_ptr as usize;
         let mem_mut = memory.data_mut(&mut caller);
-        if events_addr + event_size > mem_mut.len() {
+        if events_addr + nsubs * event_size > mem_mut.len() {
             eprintln!("poll_oneoff: Events area out of bounds");
             return 1;
         }
-        // Write userdata.
-        mem_mut[events_addr..events_addr + 8].copy_from_slice(&userdata.to_le_bytes());
-        // Write error code (0 for success) as u16.
-        mem_mut[events_addr + 8..events_addr + 10].copy_from_slice(&0u16.to_le_bytes());
-        // Write the event type.
-        mem_mut[events_addr + 10..events_addr + 12].copy_from_slice(&sub_type.to_le_bytes());
-        // Zero the remaining bytes.
-        for byte in &mut mem_mut[events_addr + 12..events_addr + event_size] {
-            *byte = 0;
+        // For each subscription, if the current time is at or past its wake time, record an event.
+        for (userdata, sub_type, wake_time) in subscriptions.iter() {
+            if current_time >= *wake_time {
+                let event_offset = events_addr + num_events * event_size;
+                // Write userdata (8 bytes).
+                mem_mut[event_offset..event_offset + 8].copy_from_slice(&userdata.to_le_bytes());
+                // Write error code (0 for success) as u16.
+                mem_mut[event_offset + 8..event_offset + 10].copy_from_slice(&0u16.to_le_bytes());
+                // Write the event type.
+                mem_mut[event_offset + 10..event_offset + 12].copy_from_slice(&sub_type.to_le_bytes());
+                // Zero the remaining bytes.
+                for byte in &mut mem_mut[event_offset + 12..event_offset + event_size] {
+                    *byte = 0;
+                }
+                num_events += 1;
+            }
         }
-        // Write the number of events (1) to nevents_ptr.
+        // Write the number of events (triggered subscriptions) to nevents_ptr.
         let nevents_addr = nevents_ptr as usize;
         if nevents_addr + 8 > mem_mut.len() {
             eprintln!("poll_oneoff: nevents pointer out of bounds");
             return 1;
         }
-        mem_mut[nevents_addr..nevents_addr + 8].copy_from_slice(&1u64.to_le_bytes());
+        mem_mut[nevents_addr..nevents_addr + 8].copy_from_slice(&((num_events as u64).to_le_bytes()));
     }
     0
 }
