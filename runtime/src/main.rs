@@ -4,8 +4,10 @@ mod consensus_input;
 mod runtime;
 mod wasi_syscalls;
 
+use std::net::TcpStream;
+
 fn main() -> Result<()> {
-    // Determine execution mode: benchmark, hybrid, or interactive.
+    // Determine execution mode: "benchmark" or "tcp"
     let args: Vec<String> = std::env::args().collect();
     let mode = if args.len() > 1 { &args[1] } else { "benchmark" };
     println!("Running in {} mode", mode);
@@ -30,15 +32,13 @@ fn main() -> Result<()> {
             let consensus_file = "consensus/consensus_input.bin";
             runtime::scheduler::run_scheduler_with_file(processes, consensus_file)?;
         },
-        "interactive" => {
-            println!("Interactive mode: reading from standard input.");
-            // Instead of opening a named pipe, read from standard input.
-            let stdin = std::io::stdin();
-            let mut consensus_pipe = stdin.lock();
-            runtime::scheduler::run_scheduler_interactive(processes, &mut consensus_pipe)?;
+        "tcp" => {
+            println!("TCP mode: connecting to consensus server at 127.0.0.1:9000");
+            let mut stream = TcpStream::connect("127.0.0.1:9000")?;
+            runtime::scheduler::run_scheduler_interactive(processes, &mut stream)?;
         },
         _ => {
-            eprintln!("Unknown mode: {}. Use benchmark, hybrid, or interactive.", mode);
+            eprintln!("Unknown mode: {}. Use benchmark or tcp.", mode);
         }
     }
 
