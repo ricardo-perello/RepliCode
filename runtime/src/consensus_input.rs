@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::runtime::process::Process;
 use crate::runtime::clock::GlobalClock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use log::{info, error};
 
 // Global read offset used by the file-based consensus function.
 static READ_OFFSET: AtomicU64 = AtomicU64::new(0);
@@ -40,7 +41,7 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<Process>) -> 
         // Read message bytes.
         let mut msg_buf = vec![0u8; msg_size as usize];
         if let Err(e) = reader.read_exact(&mut msg_buf) {
-            eprintln!("Failed to read message: {}", e);
+            error!("Failed to read message: {}", e);
             break;
         }
 
@@ -52,7 +53,7 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<Process>) -> 
         let msg_str = match String::from_utf8(msg_buf) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to decode message as UTF-8: {}", e);
+                error!("Failed to decode message as UTF-8: {}", e);
                 continue;
             }
         };
@@ -63,12 +64,12 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<Process>) -> 
                 match delta_str.trim().parse::<u64>() {
                     Ok(delta) => {
                         GlobalClock::increment(delta);
-                        eprintln!("Global clock incremented by {}", delta);
+                        info!("Global clock incremented by {}", delta);
                     }
-                    Err(e) => eprintln!("Invalid clock increment: {}", e),
+                    Err(e) => error!("Invalid clock increment: {}", e),
                 }
             } else {
-                eprintln!("Invalid clock message format: {}", msg_str);
+                error!("Invalid clock message format: {}", msg_str);
             }
             // End of the batch.
             break;
@@ -78,19 +79,19 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<Process>) -> 
         // Expected format: "fd:<number>,body:<data>"
         let parts: Vec<&str> = msg_str.split(",body:").collect();
         if parts.len() != 2 {
-            eprintln!("Invalid message format: {}", msg_str);
+            error!("Invalid message format: {}", msg_str);
             continue;
         }
         let fd: i32 = if let Some(fd_part) = parts[0].strip_prefix("fd:") {
             match fd_part.trim().parse() {
                 Ok(num) => num,
                 Err(_) => {
-                    eprintln!("Invalid FD in message: {}", msg_str);
+                    error!("Invalid FD in message: {}", msg_str);
                     continue;
                 }
             }
         } else {
-            eprintln!("Missing FD prefix in message: {}", msg_str);
+            error!("Missing FD prefix in message: {}", msg_str);
             continue;
         };
         let body = parts[1].trim();
@@ -105,16 +106,16 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<Process>) -> 
                     fd_entry.buffer.extend_from_slice(body.as_bytes());
                     // Optionally add a newline.
                     fd_entry.buffer.push(b'\n');
-                    eprintln!("Added input to process {}'s FD {}", process_id, fd);
+                    info!("Added input to process {}'s FD {}", process_id, fd);
                 } else {
-                    eprintln!("Process {} does not have FD {} open", process_id, fd);
+                    error!("Process {} does not have FD {} open", process_id, fd);
                 }
                 process.data.cond.notify_all();
                 break;
             }
         }
         if !found {
-            eprintln!("No process found with ID {}", process_id);
+            error!("No process found with ID {}", process_id);
         }
     }
     Ok(())
@@ -148,7 +149,7 @@ pub fn process_consensus_pipe<R: Read>(consensus_pipe: &mut R, processes: &mut V
         // Read message bytes.
         let mut msg_buf = vec![0u8; msg_size as usize];
         if let Err(e) = reader.read_exact(&mut msg_buf) {
-            eprintln!("Failed to read message from pipe: {}", e);
+            error!("Failed to read message from pipe: {}", e);
             break;
         }
 
@@ -156,7 +157,7 @@ pub fn process_consensus_pipe<R: Read>(consensus_pipe: &mut R, processes: &mut V
         let msg_str = match String::from_utf8(msg_buf) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to decode pipe message as UTF-8: {}", e);
+                error!("Failed to decode pipe message as UTF-8: {}", e);
                 continue;
             }
         };
@@ -167,12 +168,12 @@ pub fn process_consensus_pipe<R: Read>(consensus_pipe: &mut R, processes: &mut V
                 match delta_str.trim().parse::<u64>() {
                     Ok(delta) => {
                         GlobalClock::increment(delta);
-                        eprintln!("Global clock incremented by {}", delta);
+                        info!("Global clock incremented by {}", delta);
                     }
-                    Err(e) => eprintln!("Invalid clock increment in pipe: {}", e),
+                    Err(e) => error!("Invalid clock increment in pipe: {}", e),
                 }
             } else {
-                eprintln!("Invalid clock message format in pipe: {}", msg_str);
+                error!("Invalid clock message format in pipe: {}", msg_str);
             }
             // End of the batch.
             break;
@@ -182,19 +183,19 @@ pub fn process_consensus_pipe<R: Read>(consensus_pipe: &mut R, processes: &mut V
         // Expected format: "fd:<number>,body:<data>"
         let parts: Vec<&str> = msg_str.split(",body:").collect();
         if parts.len() != 2 {
-            eprintln!("Invalid pipe message format: {}", msg_str);
+            error!("Invalid pipe message format: {}", msg_str);
             continue;
         }
         let fd: i32 = if let Some(fd_part) = parts[0].strip_prefix("fd:") {
             match fd_part.trim().parse() {
                 Ok(num) => num,
                 Err(_) => {
-                    eprintln!("Invalid FD in pipe message: {}", msg_str);
+                    error!("Invalid FD in pipe message: {}", msg_str);
                     continue;
                 }
             }
         } else {
-            eprintln!("Missing FD prefix in pipe message: {}", msg_str);
+            error!("Missing FD prefix in pipe message: {}", msg_str);
             continue;
         };
         let body = parts[1].trim();
@@ -209,16 +210,16 @@ pub fn process_consensus_pipe<R: Read>(consensus_pipe: &mut R, processes: &mut V
                     fd_entry.buffer.extend_from_slice(body.as_bytes());
                     // Optionally add a newline.
                     fd_entry.buffer.push(b'\n');
-                    eprintln!("Added input to process {}'s FD {} (via pipe)", process_id, fd);
+                    info!("Added input to process {}'s FD {} (via pipe)", process_id, fd);
                 } else {
-                    eprintln!("Process {} does not have FD {} open (via pipe)", process_id, fd);
+                    error!("Process {} does not have FD {} open (via pipe)", process_id, fd);
                 }
                 process.data.cond.notify_all();
                 break;
             }
         }
         if !found {
-            eprintln!("No process found with ID {} (via pipe)", process_id);
+            error!("No process found with ID {} (via pipe)", process_id);
         }
     }
     Ok(())

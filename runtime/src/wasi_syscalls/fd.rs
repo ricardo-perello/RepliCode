@@ -3,23 +3,24 @@ use std::io::{self, Write};
 use std::convert::TryInto;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
 use crate::runtime::clock::GlobalClock;
+use log::{info, error, debug};
 
 
 /// Dummy implementation for fd_close: simply logs the call.
 pub fn wasi_fd_close(_caller: Caller<'_, ProcessData>, fd: i32) -> i32 {
-    println!("Called fd_close with fd: {}", fd);
+    info!("Called fd_close with fd: {}", fd);
     0
 }
 
 /// Dummy implementation for fd_fdstat_get: logs the call.
 pub fn wasi_fd_fdstat_get(_caller: Caller<'_, ProcessData>, fd: i32, _buf: i32) -> i32 {
-    println!("Called fd_fdstat_get with fd: {}", fd);
+    info!("Called fd_fdstat_get with fd: {}", fd);
     0
 }
 
 /// Dummy implementation for fd_seek: logs the call.
 pub fn wasi_fd_seek(_caller: Caller<'_, ProcessData>, fd: i32, offset: i64, whence: i32, _newoffset: i32) -> i32 {
-    println!("Called fd_seek with fd: {}, offset: {}, whence: {}", fd, offset, whence);
+    info!("Called fd_seek with fd: {}, offset: {}, whence: {}", fd, offset, whence);
     0
 }
 
@@ -38,7 +39,7 @@ pub fn wasi_fd_read(
             let fd_entry = match table.get_fd_entry_mut(fd) {
                 Some(entry) => entry,
                 None => {
-                    eprintln!("fd_read called with invalid FD: {}", fd);
+                    error!("fd_read called with invalid FD: {}", fd);
                     return 1;
                 }
             };
@@ -59,7 +60,7 @@ pub fn wasi_fd_read(
         let memory = match caller.get_export("memory") {
             Some(Extern::Memory(mem)) => mem,
             _ => {
-                eprintln!("fd_read: Failed to find memory export");
+                error!("fd_read: Failed to find memory export");
                 return 1;
             }
         };
@@ -72,17 +73,15 @@ pub fn wasi_fd_read(
                 for i in 0..iovs_len {
                     let iovec_addr = (iovs as usize) + (i as usize) * 8;
                     if iovec_addr + 8 > data.len() {
-                        eprintln!("iovec out of bounds");
+                        error!("iovec out of bounds");
                         return 1;
                     }
-                    let offset_bytes: [u8; 4] =
-                        data[iovec_addr..iovec_addr + 4].try_into().unwrap();
-                    let len_bytes: [u8; 4] =
-                        data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
+                    let offset_bytes: [u8; 4] = data[iovec_addr..iovec_addr + 4].try_into().unwrap();
+                    let len_bytes: [u8; 4] = data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
                     let offset = u32::from_le_bytes(offset_bytes) as usize;
                     let len = u32::from_le_bytes(len_bytes) as usize;
                     if offset + len > data.len() {
-                        eprintln!("data slice out of bounds");
+                        error!("data slice out of bounds");
                         return 1;
                     }
                     let to_copy = std::cmp::min(len, data_to_read.len() - total_read);
@@ -102,17 +101,15 @@ pub fn wasi_fd_read(
             for i in 0..iovs_len {
                 let iovec_addr = (iovs as usize) + (i as usize) * 8;
                 if iovec_addr + 8 > data_mut.len() {
-                    eprintln!("iovec out of bounds");
+                    error!("iovec out of bounds");
                     return 1;
                 }
-                let offset_bytes: [u8; 4] =
-                    data_mut[iovec_addr..iovec_addr + 4].try_into().unwrap();
-                let len_bytes: [u8; 4] =
-                    data_mut[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
+                let offset_bytes: [u8; 4] = data_mut[iovec_addr..iovec_addr + 4].try_into().unwrap();
+                let len_bytes: [u8; 4] = data_mut[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
                 let offset = u32::from_le_bytes(offset_bytes) as usize;
                 let len = u32::from_le_bytes(len_bytes) as usize;
                 if offset + len > data_mut.len() {
-                    eprintln!("data slice out of bounds");
+                    error!("data slice out of bounds");
                     return 1;
                 }
                 let to_copy = std::cmp::min(len, data_to_read.len() - total_read);
@@ -130,7 +127,7 @@ pub fn wasi_fd_read(
             let total_read_bytes = (total_read as u32).to_le_bytes();
             let nread_ptr = nread as usize;
             if nread_ptr + 4 > data_mut.len() {
-                eprintln!("nread pointer out of bounds");
+                error!("nread pointer out of bounds");
                 return 1;
             }
             data_mut[nread_ptr..nread_ptr + 4].copy_from_slice(&total_read_bytes);
@@ -147,13 +144,12 @@ pub fn wasi_fd_read(
     }
 }
 
-
 /// Blocks the process, telling the scheduler we're waiting on stdin.
 fn block_process_for_stdin(caller: &mut Caller<'_, ProcessData>) {
     {
         let mut st = caller.data().state.lock().unwrap();
         if *st == ProcessState::Running {
-            println!("fd_read: Setting process state to Blocked");
+            info!("fd_read: Setting process state to Blocked");
             *st = ProcessState::Blocked;
         }
         let mut reason = caller.data().block_reason.lock().unwrap();
@@ -165,11 +161,9 @@ fn block_process_for_stdin(caller: &mut Caller<'_, ProcessData>) {
     // Now wait until the state changes.
     let mut state = caller.data().state.lock().unwrap();
     while *state == ProcessState::Blocked {
-        // This call drops the lock while waiting and reacquires it when notified.
         state = caller.data().cond.wait(state).unwrap();
     }
 }
-
 
 pub fn wasi_poll_oneoff(
     mut caller: Caller<'_, ProcessData>,
@@ -182,7 +176,7 @@ pub fn wasi_poll_oneoff(
     let memory = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
         _ => {
-            eprintln!("poll_oneoff: Failed to find memory export");
+            error!("poll_oneoff: Failed to find memory export");
             return 1;
         }
     };
@@ -191,7 +185,7 @@ pub fn wasi_poll_oneoff(
     let subscription_size = 48;
     let nsubs = nsubscriptions as usize;
     if (subscriptions_ptr as usize) + nsubs * subscription_size > mem_data.len() {
-        eprintln!("poll_oneoff: Subscription array out of bounds");
+        error!("poll_oneoff: Subscription array out of bounds");
         return 1;
     }
 
@@ -220,7 +214,7 @@ pub fn wasi_poll_oneoff(
         subscriptions.push((userdata, sub_type, wake_time));
     }
 
-    println!(
+    info!(
         "poll_oneoff: Blocking process until earliest wake time: {} (current: {})",
         earliest_wake_time, now
     );
@@ -251,7 +245,7 @@ pub fn wasi_poll_oneoff(
     {
         let mem_mut = memory.data_mut(&mut caller);
         if events_addr + nsubs * event_size > mem_mut.len() {
-            eprintln!("poll_oneoff: Events area out of bounds");
+            error!("poll_oneoff: Events area out of bounds");
             return 1;
         }
         // For each subscription, if the current time is at or past its wake time, record an event.
@@ -274,14 +268,13 @@ pub fn wasi_poll_oneoff(
         // Write the number of events (triggered subscriptions) to nevents_ptr.
         let nevents_addr = nevents_ptr as usize;
         if nevents_addr + 8 > mem_mut.len() {
-            eprintln!("poll_oneoff: nevents pointer out of bounds");
+            error!("poll_oneoff: nevents pointer out of bounds");
             return 1;
         }
         mem_mut[nevents_addr..nevents_addr + 8].copy_from_slice(&((num_events as u64).to_le_bytes()));
     }
     0
 }
-
 
 /// Implementation for fd_write: writes to stdout/stderr.
 pub fn wasi_fd_write(
@@ -294,7 +287,7 @@ pub fn wasi_fd_write(
     let memory = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
         _ => {
-            eprintln!("fd_write: Failed to find memory export");
+            error!("fd_write: Failed to find memory export");
             return 1;
         }
     };
@@ -306,7 +299,7 @@ pub fn wasi_fd_write(
         for i in 0..iovs_len {
             let iovec_addr = (iovs as usize) + (i as usize) * 8;
             if iovec_addr + 8 > data.len() {
-                eprintln!("iovec out of bounds");
+                error!("iovec out of bounds");
                 return 1;
             }
             let offset_bytes: [u8; 4] = data[iovec_addr..iovec_addr + 4].try_into().unwrap();
@@ -314,7 +307,7 @@ pub fn wasi_fd_write(
             let offset = u32::from_le_bytes(offset_bytes) as usize;
             let len = u32::from_le_bytes(len_bytes) as usize;
             if offset + len > data.len() {
-                eprintln!("data slice out of bounds");
+                error!("data slice out of bounds");
                 return 1;
             }
             let slice = &data[offset..offset + len];
@@ -322,7 +315,7 @@ pub fn wasi_fd_write(
                 1 => { io::stdout().write_all(slice).unwrap(); },
                 2 => { io::stderr().write_all(slice).unwrap(); },
                 _ => {
-                    eprintln!("fd_write called with unsupported fd: {}", fd);
+                    error!("fd_write called with unsupported fd: {}", fd);
                     return 1;
                 }
             }
@@ -337,7 +330,7 @@ pub fn wasi_fd_write(
         let nwritten_ptr = nwritten as usize;
         let mem_mut = memory.data_mut(&mut caller);
         if nwritten_ptr + 4 > mem_mut.len() {
-            eprintln!("nwritten pointer out of bounds");
+            error!("nwritten pointer out of bounds");
             return 1;
         }
         mem_mut[nwritten_ptr..nwritten_ptr + 4].copy_from_slice(&total_written_bytes);
@@ -347,6 +340,6 @@ pub fn wasi_fd_write(
 
 /// Implementation for proc_exit: logs and terminates the process.
 pub fn wasi_proc_exit(_caller: Caller<'_, ProcessData>, code: i32) {
-    println!("Called proc_exit with code: {}", code);
+    info!("Called proc_exit with code: {}", code);
     std::process::exit(code);
 }
