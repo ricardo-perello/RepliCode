@@ -71,6 +71,26 @@ where
                                 found_running = true;
                             }
                         }
+                        Some(BlockReason::FileIO) => {
+                            let file_is_ready = true; // or parse from your input
+                            if file_is_ready {
+                                let mut st = process.data.state.lock().unwrap();
+                                *st = ProcessState::Running;
+                                *process.data.block_reason.lock().unwrap() = None;
+                                process.data.cond.notify_all();
+                                found_running = true;
+                            }
+                        }
+                        Some(BlockReason::NetworkIO) => {
+                            let net_is_ready = true; // or check from your consensus input
+                            if net_is_ready {
+                                let mut st = process.data.state.lock().unwrap();
+                                *st = ProcessState::Running;
+                                *process.data.block_reason.lock().unwrap() = None;
+                                process.data.cond.notify_all();
+                                found_running = true;
+                            }
+                        }
                         None => {}
                     }
                     // Keep it for next round whether or not it was unblocked
@@ -121,7 +141,7 @@ pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) ->
 
 /// Wrapper for interactive mode using a live consensus pipe/socket.
 pub fn run_scheduler_interactive<R: Read>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
-    run_scheduler(processes, |processes| {
+    run_scheduler(processes, |_processes| {
         let mut buffer = [0u8; 1024];
         let n = consensus_pipe.read(&mut buffer)?;
         if n > 0 {

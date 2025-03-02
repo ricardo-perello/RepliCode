@@ -1,7 +1,7 @@
 // program_b.c
 #include <stdio.h>
 #include <unistd.h>
-extern void _builtin_rt_yield(void);
+extern void __builtin_rt_yield(void);
 
 int main() {
     printf("Program B: Before sleep\n");
@@ -10,7 +10,7 @@ int main() {
     sleep(2);
     printf("Program B: After sleep\n");
     fflush(stdout);
-    _builtin_rt_yield();
+    __builtin_rt_yield();
     printf("executing again");
     return 0;
 }

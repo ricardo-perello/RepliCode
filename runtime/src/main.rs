@@ -12,6 +12,7 @@ fn main() -> Result<()> {
 
     // Spawn processes from WASM modules.
     let mut processes = Vec::new();
+    let mut wasm_files = Vec::new();
     let wasm_folder = "wasm_programs/build";
     let mut next_id = 1;
     for entry in std::fs::read_dir(wasm_folder)? {
@@ -19,10 +20,13 @@ fn main() -> Result<()> {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("wasm") {
             println!("Found WASM: {:?}", path);
-            let process = runtime::process::start_process(path, next_id)?;
-            next_id += 1;
-            processes.push(process);
+            wasm_files.push(path);
         }
+    }
+    for path in wasm_files{
+        let process = runtime::process::start_process(path, next_id)?;
+        next_id += 1;
+        processes.push(process);
     }
 
     match mode {

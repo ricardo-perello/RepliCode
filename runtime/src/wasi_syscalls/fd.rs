@@ -5,12 +5,6 @@ use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
 use crate::runtime::clock::GlobalClock;
 
 
-/// Dummy implementation for fd_close: simply logs the call.
-pub fn wasi_fd_close(_caller: Caller<'_, ProcessData>, fd: i32) -> i32 {
-    println!("Called fd_close with fd: {}", fd);
-    0
-}
-
 /// Dummy implementation for fd_fdstat_get: logs the call.
 pub fn wasi_fd_fdstat_get(_caller: Caller<'_, ProcessData>, fd: i32, _buf: i32) -> i32 {
     println!("Called fd_fdstat_get with fd: {}", fd);

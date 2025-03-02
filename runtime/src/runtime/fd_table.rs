@@ -18,7 +18,7 @@ impl fmt::Display for FDEntry {
     }
 }
 
-const MAX_FDS: usize = 8; // or bigger if needed
+pub const MAX_FDS: usize = 8; // or bigger if needed
 
 pub struct FDTable {
     pub entries: [Option<FDEntry>; MAX_FDS],
@@ -46,6 +46,23 @@ impl FDTable {
             return None;
         }
         self.entries[fd as usize].as_mut()
+    }
+
+    pub fn allocate_fd(&mut self) -> i32 {
+        for i in 0..MAX_FDS {
+            if self.entries[i].is_none() {
+                // We'll fill it later in the actual open call
+                return i as i32;
+            }
+        }
+        -1 // no free FD
+    }
+
+    /// Mark an FD slot as closed
+    pub fn deallocate_fd(&mut self, fd: i32) {
+        if fd >= 0 && (fd as usize) < MAX_FDS {
+            self.entries[fd as usize] = None;
+        }
     }
 }
 

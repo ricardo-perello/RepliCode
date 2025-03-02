@@ -19,6 +19,8 @@ impl fmt::Display for BlockReason {
         match self {
             BlockReason::StdinRead => write!(f, "StdinRead"),
             BlockReason::Timeout { resume_after } => write!(f, "Timeout until {:?}", resume_after),
+            BlockReason::FileIO => write!(f, "FileIO"),
+            BlockReason::NetworkIO => write!(f, "NetworkIO"),
         }
     }
 }
@@ -27,6 +29,8 @@ impl fmt::Display for BlockReason {
 pub enum BlockReason {
     StdinRead,
     Timeout { resume_after: u64 },
+    FileIO,             
+    NetworkIO, 
 }
 
 /// ProcessData is stored inside each Wasmtime store.
@@ -87,7 +91,7 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
             .get_typed_func::<(), ()>(&mut store, "_start")
             .expect("Missing _start function");
 
-        if let Err(e) = start_func.call(&mut store, ()) {
+        if let Err(e) = start_func.call(&mut store, ()) { //TODO this might have to be moved so that call is only called from the scheduler so all processes start at same time
             eprintln!("Error executing wasm: {:?}", e);
         }
 
