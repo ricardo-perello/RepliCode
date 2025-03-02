@@ -1,10 +1,11 @@
 use anyhow::Result;
 use crate::{
-    consensus_input::process_consensus_file,
+    consensus_input::{process_consensus_file, process_consensus_pipe},
     runtime::process::{Process, ProcessState, BlockReason},
     runtime::clock::GlobalClock,
 };
 use std::io::Read;
+use log::{info, error, debug};
 
 /// The main scheduler loop now accepts a consensus input closure that only
 /// needs a mutable reference to the process list.
@@ -25,9 +26,8 @@ where
             consensus_input(&mut processes)?;
         }
 
-
-        // 2. We'll do one pass over the processes to handle finishing/blocking states.
-        let mut found_running = false;  // did we see a process that's *already* Running?
+        // 2. Do one pass over the processes to handle finishing/blocking states.
+        let mut found_running = false;  // Did we see a process that's already Running?
         let mut next_round = Vec::with_capacity(processes.len());
 
         for process in processes {
@@ -38,12 +38,12 @@ where
 
             match state_copy {
                 ProcessState::Finished => {
-                    // Wait for the process thread to complete.
-                    // The thread ended; join and discard it.
+                    // Wait for the process thread to complete and discard it.
                     let _ = process.thread.join();
+                    info!("Process {} finished and joined.", process.id);
                 }
                 ProcessState::Blocked => {
-                    // Possibly un-block if FD input or timed out
+                    // Possibly unblock if FD input is available or timeout expired.
                     let reason = {
                         let r = process.data.block_reason.lock().unwrap();
                         r.clone()
@@ -59,6 +59,7 @@ where
                                 *st = ProcessState::Running;
                                 *process.data.block_reason.lock().unwrap() = None;
                                 process.data.cond.notify_all();
+                                info!("Process {} unblocked (stdin read).", process.id);
                                 found_running = true;
                             }
                         }
@@ -68,6 +69,28 @@ where
                                 *st = ProcessState::Running;
                                 *process.data.block_reason.lock().unwrap() = None;
                                 process.data.cond.notify_all();
+                                info!("Process {} unblocked (timeout).", process.id);
+                                found_running = true;
+                            }
+                        }
+                        Some(BlockReason::FileIO) => {
+                            let file_is_ready = true; // or parse from your input
+                            if file_is_ready {
+                                let mut st = process.data.state.lock().unwrap();
+                                *st = ProcessState::Running;
+                                *process.data.block_reason.lock().unwrap() = None;
+                                process.data.cond.notify_all();
+                                found_running = true;
+                            }
+                        }
+                        Some(BlockReason::NetworkIO) => {
+                            let net_is_ready = true; // or check from your consensus input
+                            if net_is_ready {
+                                let mut st = process.data.state.lock().unwrap();
+                                *st = ProcessState::Running;
+                                *process.data.block_reason.lock().unwrap() = None;
+                                process.data.cond.notify_all();
+                                info!("Process {} unblocked (timeout).", process.id);
                                 found_running = true;
                             }
                         }
@@ -93,45 +116,41 @@ where
                         }
                         None => {}
                     }
-                    // Keep it for next round whether or not it was unblocked
+                    // Keep it for the next round.
                     next_round.push(process);
                 }
                 ProcessState::Running => {
-                    // We already have a Running process.
+                    // Already Running.
                     found_running = true;
                     next_round.push(process);
                 }
                 ProcessState::Ready => {
-                    // It's Ready but not Running yet. We won't promote it immediately
-                    // if we already have something Running. We'll do that after this pass
-                    // if we find no Running process at all.
+                    // It's Ready, not Running yet.
                     next_round.push(process);
                 }
             }
         }
 
-        // 3. If we have *no* Running processes but some are Ready, promote exactly one.
+        // 3. If no process is Running but some are Ready, promote exactly one.
         if !found_running {
             for process in &next_round {
                 let mut st = process.data.state.lock().unwrap();
                 if *st == ProcessState::Ready {
                     *st = ProcessState::Running;
                     process.data.cond.notify_all();
-                    println!("Promoting a Ready process to Running");
-                    break; // only promote one
+                    info!("Promoting process {} from Ready to Running", process.id);
+                    break; // Only promote one.
                 }
             }
         }
 
-        // 4. Next iteration
+        // 4. Next iteration.
         processes = next_round;
     }
 
     Ok(())
 }
 
-
-/// Wrapper for benchmark mode using a file as consensus input.
 pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) -> Result<()> {
     run_scheduler(processes, |processes| {
         // Use the existing process_consensus_file function.
@@ -141,13 +160,7 @@ pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) ->
 
 /// Wrapper for interactive mode using a live consensus pipe/socket.
 pub fn run_scheduler_interactive<R: Read>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
-    run_scheduler(processes, |_processes| {
-        let mut buffer = [0u8; 1024];
-        let n = consensus_pipe.read(&mut buffer)?;
-        if n > 0 {
-            println!("Received {} bytes from consensus pipe", n);
-            // Here you would process the input from the pipe as needed.
-        }
-        Ok(())
+    run_scheduler(processes, |processes| {
+        process_consensus_pipe(consensus_pipe, processes)
     })
 }

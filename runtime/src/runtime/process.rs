@@ -1,10 +1,10 @@
-// runtime/src/runtime/process.rs
 use std::{fmt, sync::{Arc, Condvar, Mutex}};
 use crate::runtime::fd_table::FDTable;
 use std::thread::JoinHandle;
 use anyhow::Result;
 use wasmtime::{Engine, Store, Module, Linker};
 use crate::wasi_syscalls;
+use log::{info, error, debug};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessState {
@@ -92,7 +92,7 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
             .expect("Missing _start function");
 
         if let Err(e) = start_func.call(&mut store, ()) { //TODO this might have to be moved so that call is only called from the scheduler so all processes start at same time
-            eprintln!("Error executing wasm: {:?}", e);
+            error!("Error executing wasm: {:?}", e);
         }
 
         // Mark process as Finished.
@@ -103,5 +103,6 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
         store.data().cond.notify_all();
     });
 
+    info!("Started process with id {}", id);
     Ok(Process { id, thread, data: process_data })
 }
