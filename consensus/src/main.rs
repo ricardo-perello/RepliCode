@@ -14,7 +14,7 @@ fn main() -> io::Result<()> {
     eprintln!("TCP mode: enter commands interactively (e.g., 'init <wasm_file_path>' or 'msg <pid> <message>');");
     eprintln!("          every 10 seconds a batch is sent over TCP with an automatic clock record appended.");
     eprintln!("Type 'exit' to quit.\n");
-
+    println!("Exiting...");
     let args: Vec<String> = env::args().collect();
     let mode = if args.len() > 1 { args[1].as_str() } else { "benchmark" };
 
