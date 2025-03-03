@@ -14,6 +14,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mode = if args.len() > 1 { &args[1] } else { "benchmark" };
     info!("Runtime: Running in {} mode", mode);
+    debug!("Arguments: {:?}", args);
 
     // Spawn processes from WASM modules.
     let mut processes = Vec::new();
@@ -29,6 +30,7 @@ fn main() -> Result<()> {
         }
             
     }
+    debug!("WASM files to process: {:?}", wasm_files);
     
     for path in wasm_files{
         let process = runtime::process::start_process(path, next_id)?;
@@ -46,6 +48,7 @@ fn main() -> Result<()> {
         "tcp" => {
             info!("Runtime: TCP mode: Connecting to consensus server at 127.0.0.1:9000");
             let mut stream = TcpStream::connect("127.0.0.1:9000")?;
+            debug!("Connected to TCP server");
             runtime::scheduler::run_scheduler_interactive(processes, &mut stream)?;
         },
         _ => {

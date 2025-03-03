@@ -19,11 +19,16 @@ where
             let state = p.data.state.lock().unwrap();
             *state != ProcessState::Blocked
         }).count();
+        debug!("Number of unblocked processes: {}", unblocked);
 
         if unblocked == 0 {
             // All processes are blocked.
             // Process the next batch of consensus input.
-            consensus_input(&mut processes)?;
+            debug!("All processes are blocked. Processing the next batch of consensus input.");
+            if let Err(e) = consensus_input(&mut processes) {
+                error!("Error processing consensus input: {:?}", e);
+                return Err(e);
+            }
         }
 
         // 2. Do one pass over the processes to handle finishing/blocking states.
@@ -94,26 +99,26 @@ where
                                 found_running = true;
                             }
                         }
-                        Some(BlockReason::FileIO) => {
-                            let file_is_ready = true; // or parse from your input
-                            if file_is_ready {
-                                let mut st = process.data.state.lock().unwrap();
-                                *st = ProcessState::Running;
-                                *process.data.block_reason.lock().unwrap() = None;
-                                process.data.cond.notify_all();
-                                found_running = true;
-                            }
-                        }
-                        Some(BlockReason::NetworkIO) => {
-                            let net_is_ready = true; // or check from your consensus input
-                            if net_is_ready {
-                                let mut st = process.data.state.lock().unwrap();
-                                *st = ProcessState::Running;
-                                *process.data.block_reason.lock().unwrap() = None;
-                                process.data.cond.notify_all();
-                                found_running = true;
-                            }
-                        }
+                        // Some(BlockReason::FileIO) => {
+                        //     let file_is_ready = true; // or parse from your input
+                        //     if file_is_ready {
+                        //         let mut st = process.data.state.lock().unwrap();
+                        //         *st = ProcessState::Running;
+                        //         *process.data.block_reason.lock().unwrap() = None;
+                        //         process.data.cond.notify_all();
+                        //         found_running = true;
+                        //     }
+                        // }
+                        // Some(BlockReason::NetworkIO) => {
+                        //     let net_is_ready = true; // or check from your consensus input
+                        //     if net_is_ready {
+                        //         let mut st = process.data.state.lock().unwrap();
+                        //         *st = ProcessState::Running;
+                        //         *process.data.block_reason.lock().unwrap() = None;
+                        //         process.data.cond.notify_all();
+                        //         found_running = true;
+                        //     }
+                        // }
                         None => {}
                     }
                     // Keep it for the next round.

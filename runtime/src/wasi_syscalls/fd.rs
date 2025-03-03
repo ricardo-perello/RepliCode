@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::convert::TryInto;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
 use crate::runtime::clock::GlobalClock;
-use log::{info, error, debug};
+use log::{info, error};
 
 
 

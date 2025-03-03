@@ -51,10 +51,12 @@ pub struct Process {
 
 /// Spawns a new process from a WASM module and assigns it a unique ID.
 pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
+    debug!("Starting process with path: {:?} and id: {}", path, id);
     let mut config = wasmtime::Config::new();
     config.consume_fuel(true);
     let engine = Engine::new(&config)?;
     let module = Module::from_file(&engine, &path)?;
+    debug!("WASM module loaded from path: {:?}", path);
 
     // Initialize process state and FD table.
     let state = Arc::new(Mutex::new(ProcessState::Running));
@@ -68,6 +70,7 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
             buffer: Vec::new(),
             read_ptr: 0,
         });
+        debug!("FD 0 reserved for stdin");
     }
     let process_data = ProcessData {
         state: state.clone(),
@@ -80,16 +83,21 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
 
     // Spawn a new OS thread to run the WASM module.
     let thread = std::thread::spawn(move || {
+        debug!("Spawning new thread for process id: {}", id);
         let mut store = Store::new(&engine, thread_data);
         let _ = store.set_fuel(2_000_000);
         let mut linker: Linker<ProcessData> = Linker::new(&engine);
         wasi_syscalls::register(&mut linker).expect("Failed to register WASI syscalls");
+        debug!("WASI syscalls registered");
 
         let instance = linker.instantiate(&mut store, &module)
             .expect("Failed to instantiate module");
+        debug!("WASM module instantiated");
+
         let start_func = instance
             .get_typed_func::<(), ()>(&mut store, "_start")
             .expect("Missing _start function");
+        debug!("_start function obtained");
 
         if let Err(e) = start_func.call(&mut store, ()) { //TODO this might have to be moved so that call is only called from the scheduler so all processes start at same time
             error!("Error executing wasm: {:?}", e);
@@ -101,6 +109,7 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
             *s = ProcessState::Finished;
         }
         store.data().cond.notify_all();
+        debug!("Process id: {} marked as Finished", id);
     });
 
     info!("Started process with id {}", id);
