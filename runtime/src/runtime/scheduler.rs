@@ -68,15 +68,32 @@ where
                             };
                             if fd_has_input {
                                 let mut st = process.data.state.lock().unwrap();
-                                // Mark as Ready instead of immediately Running.
-                                *st = ProcessState::Ready;
-                                *process.data.block_reason.lock().unwrap() = None;
-                                process.data.cond.notify_all();
-                                info!(
-                                    "Process {} unblocked (stdin read) and marked as Ready on thread: {}",
-                                    process.id,
-                                    thread::current().name().unwrap_or("scheduler")
-                                );
+
+                                if found_running{
+                                    // Mark as Ready instead of immediately Running.
+                                    *st = ProcessState::Ready;
+                                    *process.data.block_reason.lock().unwrap() = None;
+                                    process.data.cond.notify_all();
+                                    info!(
+                                        "Process {} unblocked (stdin read) and marked as Ready on thread: {}",
+                                        process.id,
+                                        thread::current().name().unwrap_or("scheduler")
+                                    );
+                                }
+                                else{
+                                    // Mark as Ready instead of immediately Running.
+                                    *st = ProcessState::Running;
+                                    *process.data.block_reason.lock().unwrap() = None;
+                                    process.data.cond.notify_all();
+                                    info!(
+                                        "Process {} unblocked (stdin read) and marked as Running on thread: {}",
+                                        process.id,
+                                        thread::current().name().unwrap_or("scheduler")
+                                    );
+                                    found_running = true;
+                                }
+
+                                
                             }
                         }
                         Some(BlockReason::Timeout { resume_after }) => {
