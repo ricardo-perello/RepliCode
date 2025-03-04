@@ -33,7 +33,7 @@ where
 
         // 2. Do one pass over the processes to handle finishing/blocking states.
         let mut found_running = false;  // Did we see a process that's already Running?
-        let mut next_round = Vec::with_capacity(processes.len());
+        let mut next_round = Vec::with_capacity(processes.len()); //TODO this should be in a mutex lock because all the threads reach this point at the same time, and all find it false, unblock their processes and run in parallel.
 
         for process in processes {
             let state_copy = {
