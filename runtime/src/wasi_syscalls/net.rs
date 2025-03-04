@@ -80,7 +80,7 @@ fn block_process_for_network(caller: &mut Caller<'_, ProcessData>) {
     }
 
     let mut state = caller.data().state.lock().unwrap();
-    while *state == ProcessState::Blocked {
+    while *state != ProcessState::Running {
         state = caller.data().cond.wait(state).unwrap();
     }
 }

@@ -155,7 +155,7 @@ fn block_process_for_stdin(caller: &mut Caller<'_, ProcessData>) {
 
     // Now wait until the state changes.
     let mut state = caller.data().state.lock().unwrap();
-    while *state == ProcessState::Blocked {
+    while *state != ProcessState::Running {
         state = caller.data().cond.wait(state).unwrap();
     }
 }
@@ -227,7 +227,7 @@ pub fn wasi_poll_oneoff(
     // Wait until the scheduler unblocks the process.
     {
         let mut state = caller.data().state.lock().unwrap();
-        while *state == ProcessState::Blocked {
+        while *state != ProcessState::Running {
             state = caller.data().cond.wait(state).unwrap();
         }
     } // Lock on state is dropped here.

@@ -1,5 +1,3 @@
-// runtime/src/runtime/scheduler.rs
-
 use anyhow::Result;
 use crate::{
     consensus_input::{process_consensus_file, process_consensus_pipe},
@@ -34,7 +32,7 @@ where
         debug!("Number of unblocked processes: {}", unblocked);
 
         if unblocked == 0 {
-            // All processes are blocked. Process the next batch of consensus input.
+            // All processes are blocked.
             debug!("All processes are blocked. Processing the next batch of consensus input.");
             if let Err(e) = consensus_input(&mut processes) {
                 error!("Error processing consensus input: {:?}", e);
@@ -70,54 +68,56 @@ where
                             };
                             if fd_has_input {
                                 let mut st = process.data.state.lock().unwrap();
-                                *st = ProcessState::Running;
+                                // Mark as Ready instead of immediately Running.
+                                *st = ProcessState::Ready;
                                 *process.data.block_reason.lock().unwrap() = None;
                                 process.data.cond.notify_all();
                                 info!(
-                                    "Process {} unblocked (stdin read) on thread: {}",
+                                    "Process {} unblocked (stdin read) and marked as Ready on thread: {}",
                                     process.id,
                                     thread::current().name().unwrap_or("scheduler")
                                 );
-                                found_running = true;
                             }
                         }
                         Some(BlockReason::Timeout { resume_after }) => {
                             if GlobalClock::now() >= resume_after {
                                 let mut st = process.data.state.lock().unwrap();
-                                *st = ProcessState::Running;
+                                *st = ProcessState::Ready;
                                 *process.data.block_reason.lock().unwrap() = None;
                                 process.data.cond.notify_all();
                                 info!(
-                                    "Process {} unblocked (timeout) on thread: {}",
+                                    "Process {} unblocked (timeout) and marked as Ready on thread: {}",
                                     process.id,
                                     thread::current().name().unwrap_or("scheduler")
                                 );
-                                found_running = true;
                             }
                         }
                         Some(BlockReason::FileIO) => {
                             let file_is_ready = true; // Simplified
                             if file_is_ready {
                                 let mut st = process.data.state.lock().unwrap();
-                                *st = ProcessState::Running;
+                                *st = ProcessState::Ready;
                                 *process.data.block_reason.lock().unwrap() = None;
                                 process.data.cond.notify_all();
-                                found_running = true;
+                                info!(
+                                    "Process {} unblocked (file I/O) and marked as Ready on thread: {}",
+                                    process.id,
+                                    thread::current().name().unwrap_or("scheduler")
+                                );
                             }
                         }
                         Some(BlockReason::NetworkIO) => {
                             let net_is_ready = true; // Simplified
                             if net_is_ready {
                                 let mut st = process.data.state.lock().unwrap();
-                                *st = ProcessState::Running;
+                                *st = ProcessState::Ready;
                                 *process.data.block_reason.lock().unwrap() = None;
                                 process.data.cond.notify_all();
                                 info!(
-                                    "Process {} unblocked (network IO) on thread: {}",
+                                    "Process {} unblocked (network I/O) and marked as Ready on thread: {}",
                                     process.id,
                                     thread::current().name().unwrap_or("scheduler")
                                 );
-                                found_running = true;
                             }
                         }
                         // Some(BlockReason::FileIO) => {
@@ -142,16 +142,13 @@ where
                         // }
                         None => {}
                     }
-                    // Keep it for the next round.
                     next_round.push(process);
                 }
                 ProcessState::Running => {
-                    // Already Running.
                     found_running = true;
                     next_round.push(process);
                 }
                 ProcessState::Ready => {
-                    // It's Ready, not Running yet.
                     next_round.push(process);
                 }
             }
@@ -182,6 +179,7 @@ where
 
 pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) -> Result<()> {
     run_scheduler(processes, |processes| {
+        // Use the existing process_consensus_file function.
         process_consensus_file(consensus_file, processes)
     })
 }

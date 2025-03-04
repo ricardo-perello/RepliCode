@@ -1,10 +1,16 @@
-use std::{fmt, sync::{Arc, Condvar, Mutex}};
-use crate::runtime::fd_table::FDTable;
 use anyhow::Result;
-use wasmtime::{Engine, Store, Module, Linker};
 use log::{debug, error, info};
-use crate::wasi_syscalls;
-use std::thread;
+use std::{
+    fmt,
+    sync::{Arc, Condvar, Mutex},
+    thread,
+};
+use wasmtime::{Engine, Module, Store, Linker};
+
+use crate::{
+    runtime::fd_table::{FDEntry, FDTable},
+    wasi_syscalls,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessState {
@@ -12,6 +18,12 @@ pub enum ProcessState {
     Ready,
     Blocked,
     Finished,
+}
+
+impl fmt::Display for ProcessState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 impl fmt::Display for BlockReason {
@@ -29,11 +41,10 @@ impl fmt::Display for BlockReason {
 pub enum BlockReason {
     StdinRead,
     Timeout { resume_after: u64 },
-    FileIO,             
-    NetworkIO, 
+    FileIO,
+    NetworkIO,
 }
 
-/// ProcessData is stored inside each Wasmtime store.
 #[derive(Clone)]
 pub struct ProcessData {
     pub state: Arc<Mutex<ProcessState>>,
@@ -42,15 +53,14 @@ pub struct ProcessData {
     pub fd_table: Arc<Mutex<FDTable>>,
 }
 
-/// Process encapsulates a running process.
 pub struct Process {
-    pub id: u64,  // Unique process ID
+    pub id: u64, // Unique process ID
     pub thread: thread::JoinHandle<()>,
     pub data: ProcessData,
 }
 
 /// Spawns a new process from a WASM module and assigns it a unique ID.
-/// The spawned thread is given a name "pid<id>".
+/// The spawned thread is given a name (e.g. "pid3").
 pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
     debug!("Starting process with path: {:?} and id: {}", path, id);
     let mut config = wasmtime::Config::new();
@@ -67,7 +77,7 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
     {
         let mut table = fd_table.lock().unwrap();
         // Reserve FD 0 for stdin.
-        table.entries[0] = Some(crate::runtime::fd_table::FDEntry {
+        table.entries[0] = Some(FDEntry {
             buffer: Vec::new(),
             read_ptr: 0,
         });
@@ -77,12 +87,9 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
         state: state.clone(),
         cond: cond.clone(),
         block_reason: reason,
-        fd_table: fd_table,
+        fd_table,
     };
     let thread_data = process_data.clone();
-
-    // Spawn a new OS thread to run the WASM module.
-    // Use a Builder to give the thread a name (e.g. "pid3")
     let thread = thread::Builder::new()
         .name(format!("pid{}", id))
         .spawn(move || {
@@ -100,6 +107,10 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
                 .instantiate(&mut store, &module)
                 .expect("Failed to instantiate module");
             debug!("WASM module instantiated");
+
+            // Log that process initialization is complete.
+            debug!("Process id: {} initialization complete, ready to execute _start", id);
+
             let start_func = instance
                 .get_typed_func::<(), ()>(&mut store, "_start")
                 .expect("Missing _start function");
