@@ -6,6 +6,7 @@ use crate::{
         process::{BlockReason, Process, ProcessState},
     },
 };
+use std::collections::VecDeque;
 use std::io::Read;
 use log::{debug, error, info};
 use std::thread;
@@ -15,19 +16,20 @@ pub fn run_scheduler<F>(processes: Vec<Process>, mut consensus_input: F) -> Resu
 where
     F: FnMut(&mut Vec<Process>) -> Result<()>,
 {
-    // Initialize the queues. Initially, all processes are in the ready queue.
-    let mut ready_queue: Vec<Process> = processes;
-    let mut blocked_queue: Vec<Process> = Vec::new();
+    // Initialize the two queues.
+    // All processes start in the ready queue.
+    let mut ready_queue: VecDeque<Process> = processes.into();
+    let mut blocked_queue: VecDeque<Process> = VecDeque::new();
 
     debug!(
         "Scheduler running on thread: {}",
         thread::current().name().unwrap_or("scheduler")
     );
 
-    // Main scheduling loop: continue until both queues are empty.
+    // Main scheduling loop: run until both queues are empty.
     while !ready_queue.is_empty() || !blocked_queue.is_empty() {
-        // Process the ready queue.
-        while let Some(proc) = ready_queue.pop() {
+        // Process all processes in the ready queue.
+        while let Some(proc) = ready_queue.pop_front() {
             {
                 // Set the process state to Running.
                 let mut st = proc.data.state.lock().unwrap();
@@ -52,39 +54,38 @@ where
                 }
             }
 
-            // Now, decide where to put the process based on its new state.
-            let current_state = {
-                let st = proc.data.state.lock().unwrap();
-                *st
-            };
+            // Check the new state of the process.
+            let current_state = { *proc.data.state.lock().unwrap() };
 
             match current_state {
                 ProcessState::Finished => {
+                    // Join the thread and discard the process.
                     let _ = proc.thread.join();
                     info!("Process {} finished and joined.", proc.id);
                 }
                 ProcessState::Ready => {
-                    // Process yielded: push it at the back of the ready queue.
+                    // Process yielded: push it to the back of the ready queue.
                     info!("Process {} yielded; moving it to Ready queue.", proc.id);
-                    ready_queue.push(proc);
+                    ready_queue.push_back(proc);
                 }
                 ProcessState::Blocked => {
                     // Process is blocked: push it into the blocked queue.
                     info!("Process {} blocked; moving it to Blocked queue.", proc.id);
-                    blocked_queue.push(proc);
+                    blocked_queue.push_back(proc);
                 }
                 ProcessState::Running => {
-                    // This should never happen because we waited until it was no longer Running.
+                    // This should never occur since we waited until it was not Running.
                     error!("Process {} still Running unexpectedly.", proc.id);
                 }
             }
         }
 
-        // If there are no ready processes, call consensus input to update process states
-        // and then check whether blocked processes can be unblocked.
+        // If there are no ready processes but some are blocked, call consensus input
+        // to update process states and then try to unblock processes.
         if ready_queue.is_empty() && !blocked_queue.is_empty() {
-            // First, call consensus input on all processes.
-            let mut all_processes: Vec<Process> = ready_queue.drain(..)
+            // Combine all processes to update their states.
+            let mut all_processes: Vec<Process> = ready_queue
+                .drain(..)
                 .chain(blocked_queue.drain(..))
                 .collect();
             consensus_input(&mut all_processes)?;
@@ -94,33 +95,37 @@ where
             for proc in all_processes.into_iter() {
                 let state = { *proc.data.state.lock().unwrap() };
                 match state {
-                    ProcessState::Ready => ready_queue.push(proc),
-                    ProcessState::Blocked => blocked_queue.push(proc),
+                    ProcessState::Ready => ready_queue.push_back(proc),
+                    ProcessState::Blocked => blocked_queue.push_back(proc),
                     ProcessState::Finished => {
                         let _ = proc.thread.join();
                         info!("Process {} finished and joined.", proc.id);
                     }
                     ProcessState::Running => {
-                        error!("Process {} still Running unexpectedly after consensus input.", proc.id);
+                        error!(
+                            "Process {} still Running unexpectedly after consensus input.",
+                            proc.id
+                        );
                     }
                 }
             }
 
-            // Next, examine each process in the blocked queue to see if it can be unblocked.
-            let mut still_blocked = Vec::new();
-            for proc in blocked_queue.drain(..) {
+            // Next, examine each blocked process to see if it can be unblocked.
+            let mut still_blocked = VecDeque::new();
+            while let Some(proc) = blocked_queue.pop_front() {
                 let unblocked = {
                     let reason = proc.data.block_reason.lock().unwrap().clone();
                     match reason {
                         Some(BlockReason::StdinRead) => {
-                            // Check if FD 0 has input.
                             let fd_has_input = {
                                 let fd_table = proc.data.fd_table.lock().unwrap();
                                 fd_table.has_pending_input(0)
                             };
                             fd_has_input
                         }
-                        Some(BlockReason::Timeout { resume_after }) => GlobalClock::now() >= resume_after,
+                        Some(BlockReason::Timeout { resume_after }) => {
+                            GlobalClock::now() >= resume_after
+                        }
                         // Add additional conditions here if needed.
                         _ => false,
                     }
@@ -141,14 +146,14 @@ where
                         proc.id,
                         thread::current().name().unwrap_or("scheduler")
                     );
-                    ready_queue.push(proc);
+                    ready_queue.push_back(proc);
                 } else {
-                    still_blocked.push(proc);
+                    still_blocked.push_back(proc);
                 }
             }
             blocked_queue = still_blocked;
 
-            // If still no process is ready, sleep briefly before the next check.
+            // If still no process is ready, sleep briefly before trying again.
             if ready_queue.is_empty() {
                 debug!("No processes unblocked; scheduler sleeping briefly.");
                 thread::sleep(Duration::from_millis(10));
@@ -160,6 +165,7 @@ where
 
 pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) -> Result<()> {
     run_scheduler(processes, |processes| {
+        // Use the existing process_consensus_file function.
         process_consensus_file(consensus_file, processes)
     })
 }

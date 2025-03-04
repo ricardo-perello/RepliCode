@@ -4,13 +4,10 @@
 extern void __builtin_rt_yield(void);
 
 int main() {
-    printf("Program D: Before sleep\n");
-    fflush(stdout);
-    printf("pausing");
+    printf("Program D: yield\n");
     fflush(stdout);
     __builtin_rt_yield();
-    printf("executing again");
-    printf("Program D: After sleep\n");
+    printf("Program D: executing again\n");
     fflush(stdout);
     return 0;
 }
