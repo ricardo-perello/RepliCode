@@ -1,10 +1,10 @@
 use std::{fmt, sync::{Arc, Condvar, Mutex}};
 use crate::runtime::fd_table::FDTable;
-use std::thread::JoinHandle;
 use anyhow::Result;
 use wasmtime::{Engine, Store, Module, Linker};
+use log::{debug, error, info};
 use crate::wasi_syscalls;
-use log::{info, error, debug};
+use std::thread;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessState {
@@ -45,11 +45,12 @@ pub struct ProcessData {
 /// Process encapsulates a running process.
 pub struct Process {
     pub id: u64,  // Unique process ID
-    pub thread: JoinHandle<()>,
+    pub thread: thread::JoinHandle<()>,
     pub data: ProcessData,
 }
 
 /// Spawns a new process from a WASM module and assigns it a unique ID.
+/// The spawned thread is given a name "pid<id>".
 pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
     debug!("Starting process with path: {:?} and id: {}", path, id);
     let mut config = wasmtime::Config::new();
@@ -78,40 +79,41 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
         block_reason: reason,
         fd_table: fd_table,
     };
-
     let thread_data = process_data.clone();
 
     // Spawn a new OS thread to run the WASM module.
-    let thread = std::thread::spawn(move || {
-        debug!("Spawning new thread for process id: {}", id);
-        let mut store = Store::new(&engine, thread_data);
-        let _ = store.set_fuel(2_000_000);
-        let mut linker: Linker<ProcessData> = Linker::new(&engine);
-        wasi_syscalls::register(&mut linker).expect("Failed to register WASI syscalls");
-        debug!("WASI syscalls registered");
-
-        let instance = linker.instantiate(&mut store, &module)
-            .expect("Failed to instantiate module");
-        debug!("WASM module instantiated");
-
-        let start_func = instance
-            .get_typed_func::<(), ()>(&mut store, "_start")
-            .expect("Missing _start function");
-        debug!("_start function obtained");
-
-        if let Err(e) = start_func.call(&mut store, ()) { //TODO this might have to be moved so that call is only called from the scheduler so all processes start at same time
-            error!("Error executing wasm: {:?}", e);
-        }
-
-        // Mark process as Finished.
-        {
-            let mut s = store.data().state.lock().unwrap();
-            *s = ProcessState::Finished;
-        }
-        store.data().cond.notify_all();
-        debug!("Process id: {} marked as Finished", id);
-    });
-
+    // Use a Builder to give the thread a name (e.g. "pid3")
+    let thread = thread::Builder::new()
+        .name(format!("pid{}", id))
+        .spawn(move || {
+            debug!(
+                "Thread {:?} starting execution for process id: {}",
+                thread::current().name().unwrap_or("unknown"),
+                id
+            );
+            let mut store = Store::new(&engine, thread_data);
+            let _ = store.set_fuel(2_000_000);
+            let mut linker: Linker<ProcessData> = Linker::new(&engine);
+            wasi_syscalls::register(&mut linker).expect("Failed to register WASI syscalls");
+            debug!("WASI syscalls registered");
+            let instance = linker
+                .instantiate(&mut store, &module)
+                .expect("Failed to instantiate module");
+            debug!("WASM module instantiated");
+            let start_func = instance
+                .get_typed_func::<(), ()>(&mut store, "_start")
+                .expect("Missing _start function");
+            debug!("_start function obtained");
+            if let Err(e) = start_func.call(&mut store, ()) {
+                error!("Error executing wasm: {:?}", e);
+            }
+            {
+                let mut s = store.data().state.lock().unwrap();
+                *s = ProcessState::Finished;
+            }
+            store.data().cond.notify_all();
+            debug!("Process id: {} marked as Finished", id);
+        })?;
     info!("Started process with id {}", id);
     Ok(Process { id, thread, data: process_data })
 }
