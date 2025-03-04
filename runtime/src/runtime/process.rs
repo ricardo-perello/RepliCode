@@ -70,7 +70,7 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
     debug!("WASM module loaded from path: {:?}", path);
 
     // Initialize process state and FD table.
-    let state = Arc::new(Mutex::new(ProcessState::Running));
+    let state = Arc::new(Mutex::new(ProcessState::Ready));
     let cond = Arc::new(Condvar::new());
     let reason = Arc::new(Mutex::new(None));
     let fd_table = Arc::new(Mutex::new(FDTable::new()));
@@ -115,6 +115,15 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
                 .get_typed_func::<(), ()>(&mut store, "_start")
                 .expect("Missing _start function");
             debug!("_start function obtained");
+        
+            {
+                let mut st = store.data().state.lock().unwrap();
+                while *st != ProcessState::Running {
+                    debug!("Waiting until process {} state is Running (current state: {:?})", id, *st);
+                    st = store.data().cond.wait(st).unwrap();
+                }
+            }
+
             if let Err(e) = start_func.call(&mut store, ()) {
                 error!("Error executing wasm: {:?}", e);
             }
@@ -125,6 +134,7 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
             store.data().cond.notify_all();
             debug!("Process id: {} marked as Finished", id);
         })?;
+        //wait for thread to return then execute the next line
     info!("Started process with id {}", id);
     Ok(Process { id, thread, data: process_data })
 }

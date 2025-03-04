@@ -9,194 +9,157 @@ use crate::{
 use std::io::Read;
 use log::{debug, error, info};
 use std::thread;
+use std::time::Duration;
 
-pub fn run_scheduler<F>(mut processes: Vec<Process>, mut consensus_input: F) -> Result<()>
+pub fn run_scheduler<F>(processes: Vec<Process>, mut consensus_input: F) -> Result<()>
 where
     F: FnMut(&mut Vec<Process>) -> Result<()>,
 {
-    // Log the scheduler thread name (if available)
+    // Initialize the queues. Initially, all processes are in the ready queue.
+    let mut ready_queue: Vec<Process> = processes;
+    let mut blocked_queue: Vec<Process> = Vec::new();
+
     debug!(
         "Scheduler running on thread: {}",
         thread::current().name().unwrap_or("scheduler")
     );
 
-    while !processes.is_empty() {
-        // Count the processes that are not blocked.
-        let unblocked = processes
-            .iter()
-            .filter(|p| {
-                let state = p.data.state.lock().unwrap();
-                *state != ProcessState::Blocked
-            })
-            .count();
-        debug!("Number of unblocked processes: {}", unblocked);
-
-        if unblocked == 0 {
-            // All processes are blocked.
-            debug!("All processes are blocked. Processing the next batch of consensus input.");
-            if let Err(e) = consensus_input(&mut processes) {
-                error!("Error processing consensus input: {:?}", e);
-                return Err(e);
+    // Main scheduling loop: continue until both queues are empty.
+    while !ready_queue.is_empty() || !blocked_queue.is_empty() {
+        // Process the ready queue.
+        while let Some(proc) = ready_queue.pop() {
+            {
+                // Set the process state to Running.
+                let mut st = proc.data.state.lock().unwrap();
+                *st = ProcessState::Running;
+                proc.data.cond.notify_all();
+                info!(
+                    "Process {} marked as Running on thread: {}",
+                    proc.id,
+                    thread::current().name().unwrap_or("scheduler")
+                );
             }
-        }
 
-        // 2. Do one pass over the processes to handle finishing/blocking states.
-        let mut found_running = false; // Did we see a process that's already Running?
-        let mut next_round = Vec::with_capacity(processes.len());
-        for process in processes {
-            let state_copy = {
-                let guard = process.data.state.lock().unwrap();
-                *guard
+            // Wait until the process is no longer Running.
+            {
+                let mut st = proc.data.state.lock().unwrap();
+                while *st == ProcessState::Running {
+                    debug!(
+                        "Scheduler waiting for process {} (current state: {:?})",
+                        proc.id, *st
+                    );
+                    st = proc.data.cond.wait(st).unwrap();
+                }
+            }
+
+            // Now, decide where to put the process based on its new state.
+            let current_state = {
+                let st = proc.data.state.lock().unwrap();
+                *st
             };
-            match state_copy {
+
+            match current_state {
                 ProcessState::Finished => {
-                    // Wait for the process thread to complete and discard it.
-                    let _ = process.thread.join();
-                    info!("Process {} finished and joined.", process.id);
-                }
-                ProcessState::Blocked => {
-                    // Possibly unblock if FD input is available or timeout expired.
-                    let reason = {
-                        let r = process.data.block_reason.lock().unwrap();
-                        r.clone()
-                    };
-                    match reason {
-                        Some(BlockReason::StdinRead) => {
-                            let fd_has_input = {
-                                let fd_table = process.data.fd_table.lock().unwrap();
-                                fd_table.has_pending_input(0)
-                            };
-                            if fd_has_input {
-                                let mut st = process.data.state.lock().unwrap();
-
-                                if found_running{
-                                    // Mark as Ready instead of immediately Running.
-                                    *st = ProcessState::Ready;
-                                    *process.data.block_reason.lock().unwrap() = None;
-                                    process.data.cond.notify_all();
-                                    info!(
-                                        "Process {} unblocked (stdin read) and marked as Ready on thread: {}",
-                                        process.id,
-                                        thread::current().name().unwrap_or("scheduler")
-                                    );
-                                }
-                                else{
-                                    // Mark as Ready instead of immediately Running.
-                                    *st = ProcessState::Running;
-                                    *process.data.block_reason.lock().unwrap() = None;
-                                    process.data.cond.notify_all();
-                                    info!(
-                                        "Process {} unblocked (stdin read) and marked as Running on thread: {}",
-                                        process.id,
-                                        thread::current().name().unwrap_or("scheduler")
-                                    );
-                                    found_running = true;
-                                }
-
-                                
-                            }
-                        }
-                        Some(BlockReason::Timeout { resume_after }) => {
-                            if GlobalClock::now() >= resume_after {
-                                let mut st = process.data.state.lock().unwrap();
-                                *st = ProcessState::Ready;
-                                *process.data.block_reason.lock().unwrap() = None;
-                                process.data.cond.notify_all();
-                                info!(
-                                    "Process {} unblocked (timeout) and marked as Ready on thread: {}",
-                                    process.id,
-                                    thread::current().name().unwrap_or("scheduler")
-                                );
-                            }
-                        }
-                        Some(BlockReason::FileIO) => {
-                            let file_is_ready = true; // Simplified
-                            if file_is_ready {
-                                let mut st = process.data.state.lock().unwrap();
-                                *st = ProcessState::Ready;
-                                *process.data.block_reason.lock().unwrap() = None;
-                                process.data.cond.notify_all();
-                                info!(
-                                    "Process {} unblocked (file I/O) and marked as Ready on thread: {}",
-                                    process.id,
-                                    thread::current().name().unwrap_or("scheduler")
-                                );
-                            }
-                        }
-                        Some(BlockReason::NetworkIO) => {
-                            let net_is_ready = true; // Simplified
-                            if net_is_ready {
-                                let mut st = process.data.state.lock().unwrap();
-                                *st = ProcessState::Ready;
-                                *process.data.block_reason.lock().unwrap() = None;
-                                process.data.cond.notify_all();
-                                info!(
-                                    "Process {} unblocked (network I/O) and marked as Ready on thread: {}",
-                                    process.id,
-                                    thread::current().name().unwrap_or("scheduler")
-                                );
-                            }
-                        }
-                        // Some(BlockReason::FileIO) => {
-                        //     let file_is_ready = true; // or parse from your input
-                        //     if file_is_ready {
-                        //         let mut st = process.data.state.lock().unwrap();
-                        //         *st = ProcessState::Running;
-                        //         *process.data.block_reason.lock().unwrap() = None;
-                        //         process.data.cond.notify_all();
-                        //         found_running = true;
-                        //     }
-                        // }
-                        // Some(BlockReason::NetworkIO) => {
-                        //     let net_is_ready = true; // or check from your consensus input
-                        //     if net_is_ready {
-                        //         let mut st = process.data.state.lock().unwrap();
-                        //         *st = ProcessState::Running;
-                        //         *process.data.block_reason.lock().unwrap() = None;
-                        //         process.data.cond.notify_all();
-                        //         found_running = true;
-                        //     }
-                        // }
-                        None => {}
-                    }
-                    next_round.push(process);
-                }
-                ProcessState::Running => {
-                    found_running = true;
-                    next_round.push(process);
+                    let _ = proc.thread.join();
+                    info!("Process {} finished and joined.", proc.id);
                 }
                 ProcessState::Ready => {
-                    next_round.push(process);
+                    // Process yielded: push it at the back of the ready queue.
+                    info!("Process {} yielded; moving it to Ready queue.", proc.id);
+                    ready_queue.push(proc);
+                }
+                ProcessState::Blocked => {
+                    // Process is blocked: push it into the blocked queue.
+                    info!("Process {} blocked; moving it to Blocked queue.", proc.id);
+                    blocked_queue.push(proc);
+                }
+                ProcessState::Running => {
+                    // This should never happen because we waited until it was no longer Running.
+                    error!("Process {} still Running unexpectedly.", proc.id);
                 }
             }
         }
 
-        // 3. If no process is Running but some are Ready, promote exactly one.
-        if !found_running {
-            for process in &next_round {
-                let mut st = process.data.state.lock().unwrap();
-                if *st == ProcessState::Ready {
-                    *st = ProcessState::Running;
-                    process.data.cond.notify_all();
+        // If there are no ready processes, call consensus input to update process states
+        // and then check whether blocked processes can be unblocked.
+        if ready_queue.is_empty() && !blocked_queue.is_empty() {
+            // First, call consensus input on all processes.
+            let mut all_processes: Vec<Process> = ready_queue.drain(..)
+                .chain(blocked_queue.drain(..))
+                .collect();
+            consensus_input(&mut all_processes)?;
+            info!("No ready processes; consensus input updated process states.");
+
+            // Re-split the processes into ready and blocked queues.
+            for proc in all_processes.into_iter() {
+                let state = { *proc.data.state.lock().unwrap() };
+                match state {
+                    ProcessState::Ready => ready_queue.push(proc),
+                    ProcessState::Blocked => blocked_queue.push(proc),
+                    ProcessState::Finished => {
+                        let _ = proc.thread.join();
+                        info!("Process {} finished and joined.", proc.id);
+                    }
+                    ProcessState::Running => {
+                        error!("Process {} still Running unexpectedly after consensus input.", proc.id);
+                    }
+                }
+            }
+
+            // Next, examine each process in the blocked queue to see if it can be unblocked.
+            let mut still_blocked = Vec::new();
+            for proc in blocked_queue.drain(..) {
+                let unblocked = {
+                    let reason = proc.data.block_reason.lock().unwrap().clone();
+                    match reason {
+                        Some(BlockReason::StdinRead) => {
+                            // Check if FD 0 has input.
+                            let fd_has_input = {
+                                let fd_table = proc.data.fd_table.lock().unwrap();
+                                fd_table.has_pending_input(0)
+                            };
+                            fd_has_input
+                        }
+                        Some(BlockReason::Timeout { resume_after }) => GlobalClock::now() >= resume_after,
+                        // Add additional conditions here if needed.
+                        _ => false,
+                    }
+                };
+
+                if unblocked {
+                    {
+                        let mut st = proc.data.state.lock().unwrap();
+                        *st = ProcessState::Ready;
+                    }
+                    {
+                        let mut reason = proc.data.block_reason.lock().unwrap();
+                        *reason = None;
+                    }
+                    proc.data.cond.notify_all();
                     info!(
-                        "Promoting process {} from Ready to Running on thread: {}",
-                        process.id,
+                        "Process {} unblocked and moved to Ready queue on thread: {}",
+                        proc.id,
                         thread::current().name().unwrap_or("scheduler")
                     );
-                    break; // Only promote one.
+                    ready_queue.push(proc);
+                } else {
+                    still_blocked.push(proc);
                 }
             }
-        }
+            blocked_queue = still_blocked;
 
-        // 4. Next iteration.
-        processes = next_round;
+            // If still no process is ready, sleep briefly before the next check.
+            if ready_queue.is_empty() {
+                debug!("No processes unblocked; scheduler sleeping briefly.");
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
     Ok(())
 }
 
 pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) -> Result<()> {
     run_scheduler(processes, |processes| {
-        // Use the existing process_consensus_file function.
         process_consensus_file(consensus_file, processes)
     })
 }
