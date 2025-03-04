@@ -33,7 +33,7 @@ pub fn wasi_fd_read(
             let mut table = process_data.fd_table.lock().unwrap();
             let fd_entry = match table.get_fd_entry_mut(fd) {
                 Some(entry) => entry,
-                None => {
+                _ => {
                     error!("fd_read called with invalid FD: {}", fd);
                     return 1;
                 }

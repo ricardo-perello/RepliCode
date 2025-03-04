@@ -38,15 +38,15 @@ pub fn parse_command(line: &str) -> Option<Command> {
     }
     match tokens[0].to_lowercase().as_str() {
         "init" => {
-            // If a file path is provided on the command line, use it; otherwise, prompt the user.
+            // existing init command handling...
             let file_path = if tokens.len() >= 2 {
-                tokens[1].to_string()  // convert to owned String
+                tokens[1].to_string()
             } else {
                 eprint!("Enter WASM file path: ");
                 io::stderr().flush().ok()?;
                 let mut input = String::new();
                 io::stdin().read_line(&mut input).ok()?;
-                input.trim().to_string()  // convert trimmed slice to owned String
+                input.trim().to_string()
             };
             let wasm_bytes = read_wasm_file(&file_path);
             Some(Command::Init(wasm_bytes))
@@ -63,13 +63,23 @@ pub fn parse_command(line: &str) -> Option<Command> {
                     return Some(Command::Msg(0, String::new()));
                 }
             };
-            // Reconstruct the message (all tokens after the PID).
             let message = tokens[2..].join(" ");
             Some(Command::Msg(pid, message))
         },
+        "clock" => {
+            if tokens.len() < 2 {
+                eprintln!("Usage: clock <time>");
+                return Some(Command::Msg(0, String::new()));
+            }
+            let time_value = tokens[1];
+            // Create a clock record with process ID 0.
+            let message = format!("clock:{}", time_value);
+            Some(Command::Msg(0, message))
+        },
         _ => {
-            eprintln!("Unknown command. Use 'init <wasm_file_path>' or 'msg <pid> <message>'.");
+            eprintln!("Unknown command. Use 'init <wasm_file_path>', 'msg <pid> <message>', or 'clock <time>'.");
             Some(Command::Msg(0, String::new()))
         }
     }
 }
+

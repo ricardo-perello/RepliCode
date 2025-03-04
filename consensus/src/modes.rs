@@ -17,7 +17,7 @@ pub fn run_benchmark_mode() -> io::Result<()> {
         .open(file_path)?;
 
     loop {
-        eprint!("Command (init <file> | msg <pid> <message>): ");
+        eprint!("Command (init <file> | msg <pid> <message> | clock <nanoseconds>): ");
         io::stderr().flush()?;
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
