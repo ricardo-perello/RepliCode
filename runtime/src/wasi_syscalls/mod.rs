@@ -13,7 +13,7 @@ pub fn register(linker: &mut Linker<ProcessData>) -> Result<()> {
     linker.func_wrap("wasi_snapshot_preview1", "poll_oneoff", fd::wasi_poll_oneoff)?;
     linker.func_wrap("wasi_snapshot_preview1", "proc_exit", fd::wasi_proc_exit)?;
 
-    linker.func_wrap("env","__builtin_rt_yield",builtin_yield::wasi_builtin_rt_yield)?;
+    linker.func_wrap("env","__builtin_rt_yield",builtin_yield::wasi__builtin_rt_yield)?;
 
     linker.func_wrap("wasi_snapshot_preview1", "path_open", fs::wasi_path_open)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_readdir", fs::wasi_fd_readdir)?;
