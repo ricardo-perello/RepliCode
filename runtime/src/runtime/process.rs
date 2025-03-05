@@ -1,9 +1,7 @@
 use anyhow::Result;
 use log::{debug, error, info};
 use std::{
-    fmt,
-    sync::{Arc, Condvar, Mutex},
-    thread,
+    fmt, fs::create_dir_all, path::PathBuf, sync::{Arc, Condvar, Mutex}, thread
 };
 use wasmtime::{Engine, Module, Store, Linker};
 
@@ -51,6 +49,7 @@ pub struct ProcessData {
     pub cond: Arc<Condvar>,
     pub block_reason: Arc<Mutex<Option<BlockReason>>>,
     pub fd_table: Arc<Mutex<FDTable>>,
+    pub root_path: PathBuf,
 }
 
 pub struct Process {
@@ -83,11 +82,15 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
         });
         debug!("FD 0 reserved for stdin");
     }
+    let process_root = std::path::PathBuf::from(format!("/tmp/wasm_sandbox/pid_{}", id));
+    create_dir_all(&process_root)?;
+
     let process_data = ProcessData {
         state: state.clone(),
         cond: cond.clone(),
         block_reason: reason,
         fd_table,
+        root_path: process_root,
     };
     let thread_data = process_data.clone();
     let thread = thread::Builder::new()

@@ -6,7 +6,7 @@ use crate::{
         process::{BlockReason, Process, ProcessState},
     },
 };
-use std::collections::VecDeque;
+use std::{collections::VecDeque, fs::remove_dir_all};
 use std::io::Read;
 use log::{debug, error, info};
 use std::thread;
@@ -61,6 +61,9 @@ where
                 ProcessState::Finished => {
                     // Join the thread and discard the process.
                     let _ = proc.thread.join();
+                    if let Err(e) = remove_dir_all(&proc.data.root_path) {
+                        error!("Failed to remove dir for process {}: {}", proc.id, e);
+                    }
                     info!("Process {} finished and joined.", proc.id);
                 }
                 ProcessState::Ready => {
