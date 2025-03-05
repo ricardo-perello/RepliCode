@@ -1,6 +1,7 @@
 mod commands;
 mod record;
 mod modes;
+mod nat;
 
 use std::env;
 use std::io;
@@ -8,13 +9,13 @@ use std::io;
 fn main() -> io::Result<()> {
     eprintln!("Consensus Input Tool");
     eprintln!("----------------------");
-    eprintln!("Record format: [ process_id: u64 ][ msg_size: u16 ][ msg: [u8; msg_size] ]");
+    eprintln!("Record format: [ msg_type: u8 ][ process_id: u64 ][ msg_size: u16 ][ payload: [u8; msg_size] ]");
     eprintln!("Benchmark mode: records are written immediately to a binary file.");
     eprintln!("Hybrid mode: reads an existing binary file and sends batches over TCP (after a clock record is reached).");
-    eprintln!("TCP mode: enter commands interactively (e.g., 'init <wasm_file_path>' or 'msg <pid> <message>');");
-    eprintln!("          every 10 seconds a batch is sent over TCP with an automatic clock record appended.");
+    eprintln!("TCP mode: enter commands interactively; every 10 seconds a batch is sent over TCP with an automatic clock record appended.");
     eprintln!("Type 'exit' to quit.\n");
     println!("Exiting...");
+    
     let args: Vec<String> = env::args().collect();
     let mode = if args.len() > 1 { args[1].as_str() } else { "benchmark" };
 
