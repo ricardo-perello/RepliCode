@@ -6,6 +6,8 @@ use wasmtime::Caller;
 use crate::runtime::process::{ProcessData, ProcessState, BlockReason};
 use crate::runtime::fd_table::{FDEntry, MAX_FDS};
 
+//TODO impose limit of disk allowed to avoid untrusted processes zipbombing the server
+
 /// A helper to map I/O errors to a WASI-like i32 code (simplified).
 fn io_err_to_wasi_errno(e: &io::Error) -> i32 {
     use io::ErrorKind::*;
