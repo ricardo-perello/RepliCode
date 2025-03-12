@@ -1,6 +1,7 @@
 use wasmtime::{Caller, Extern};
 use std::io::{self, Write};
 use std::convert::TryInto;
+use crate::runtime::fd_table::MAX_FDS;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
 use crate::runtime::clock::GlobalClock;
 use log::{info, error};
@@ -159,6 +160,118 @@ fn block_process_for_stdin(caller: &mut Caller<'_, ProcessData>) {
         state = caller.data().cond.wait(state).unwrap();
     }
 }
+
+pub fn wasi_fd_prestat_get(
+    mut caller: wasmtime::Caller<'_, ProcessData>,
+    fd: i32,
+    prestat_ptr: i32,
+) -> i32 {
+    let memory = match caller.get_export("memory") {
+        Some(Extern::Memory(mem)) => mem,
+        Some(Extern::SharedMemory(_)) => {
+            error!("fd_read: SharedMemory not supported");
+            return 1;
+        },
+        Some(Extern::Func(_)) | Some(Extern::Table(_)) | Some(Extern::Global(_)) | None => {
+            return 1;
+        }
+    };
+
+    let (is_preopen, is_dir, path_len) = {
+        let pd = caller.data();
+        let table = pd.fd_table.lock().unwrap();
+        if fd < 0 || fd as usize >= MAX_FDS {
+            return 8; // WASI_EBADF
+        }
+        let entry = match &table.entries[fd as usize] {
+            Some(e) => e,
+            None => return 8,
+        };
+        if !entry.is_preopen {
+            return 8;
+        }
+        (entry.is_preopen, entry.is_directory, entry.host_path.as_ref().map(|p| p.len()).unwrap_or(1))
+    };
+    if !is_preopen || !is_dir {
+        return 8;
+    }
+
+    let mut buf = [0u8; 8];
+    buf[0] = 0; // __WASI_PREOPENTYPE_DIR
+    let name_len = path_len as u32;
+    buf[4..8].copy_from_slice(&name_len.to_le_bytes());
+
+    let offset = prestat_ptr as usize;
+    let mut mem_mut = memory.data_mut(&mut caller);
+    if offset + 8 > mem_mut.len() {
+        return 1;
+    }
+    mem_mut[offset..offset+8].copy_from_slice(&buf);
+    0
+}
+
+pub fn wasi_fd_prestat_dir_name(
+    mut caller: wasmtime::Caller<'_, ProcessData>,
+    fd: i32,
+    path_ptr: i32,
+    path_len: i32,
+) -> i32 {
+    use log::error; // If needed, or adjust as you wish
+    use wasmtime::Extern;
+
+    // 1) Copy the directory path out of the FD table while locked, then drop the lock
+    let dir_str: String = {
+        let pd = caller.data();
+        let table = pd.fd_table.lock().unwrap();
+        if fd < 0 || fd as usize >= MAX_FDS {
+            return 8; // WASI_EBADF
+        }
+        let entry = match &table.entries[fd as usize] {
+            Some(e) => e,
+            None => return 8, // invalid FD
+        };
+        if !entry.is_preopen || !entry.is_directory {
+            return 8; // Not a preopened directory
+        }
+
+        // We clone into an owned String to avoid lifetime issues
+        match &entry.host_path {
+            Some(path) => path.clone(),
+            None => "/".to_string(),
+        }
+    };
+    // (Lock is dropped here, so we can do more with `caller`)
+
+    // 2) Now we can mutably borrow caller to get memory
+    let memory = match caller.get_export("memory") {
+        Some(Extern::Memory(mem)) => mem,
+        Some(Extern::SharedMemory(_)) => {
+            error!("fd_prestat_dir_name: SharedMemory not supported");
+            return 1;
+        },
+        Some(Extern::Func(_)) | Some(Extern::Global(_)) | Some(Extern::Table(_)) | None => {
+            return 1;
+        }
+    };
+
+    // 3) Copy the string into Wasm memory
+    let needed = dir_str.len();
+    if (path_len as usize) < needed {
+        return 1; // Not enough space
+    }
+
+    let mut mem_mut = memory.data_mut(&mut caller);
+
+    let offset = path_ptr as usize;
+    if offset + needed > mem_mut.len() {
+        return 1; // Out of bounds
+    }
+
+    mem_mut[offset..offset + needed].copy_from_slice(dir_str.as_bytes());
+    0
+}
+
+
 
 pub fn wasi_poll_oneoff(
     mut caller: Caller<'_, ProcessData>,

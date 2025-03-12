@@ -28,9 +28,12 @@ pub fn wasi_sock_open(
         let process_data = caller.data();
         let mut table = process_data.fd_table.lock().unwrap();
         let fd = table.allocate_fd();
-        table.entries[fd as usize] = Some(crate::runtime::fd_table::FDEntry {
+        table.entries[fd as usize] = Some(crate::runtime::fd_table::FDEntry { //TODO should change for actual implementation
             buffer: Vec::new(),
             read_ptr: 0,
+            is_directory: false,
+            is_preopen: false,
+            host_path: None,
         });
         fd
     };

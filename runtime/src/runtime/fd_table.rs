@@ -3,20 +3,25 @@ use std::fmt;
 pub struct FDEntry {
     pub buffer: Vec<u8>,    // data waiting to be read
     pub read_ptr: usize,    // how far we've read from buffer
-    // Possibly flags, like "n_new" bits or capacity, etc.
+    pub is_directory: bool,
+    pub is_preopen: bool,
+    pub host_path: Option<String>, // the actual host filesystem path
 }
 
 impl fmt::Display for FDEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // You might want to show the buffer as a string if it is UTF-8,
-        // or as hex otherwise.
         let buffer_str = match std::str::from_utf8(&self.buffer) {
             Ok(s) => s.to_string(),
             Err(_) => format!("{:?}", self.buffer),
         };
-        write!(f, "FDEntry(buffer: \"{}\", read_ptr: {})", buffer_str, self.read_ptr)
+        write!(
+            f,
+            "FDEntry(buffer: \"{}\", read_ptr: {}, is_dir={}, is_preopen={}, host_path={:?})",
+            buffer_str, self.read_ptr, self.is_directory, self.is_preopen, self.host_path
+        )
     }
 }
+
 
 pub const MAX_FDS: usize = 8; // or bigger if needed
 

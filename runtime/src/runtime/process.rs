@@ -79,11 +79,26 @@ pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
         table.entries[0] = Some(FDEntry {
             buffer: Vec::new(),
             read_ptr: 0,
+            is_directory: false,
+            is_preopen: false,
+            host_path: None,
         });
         debug!("FD 0 reserved for stdin");
     }
     let process_root = std::path::PathBuf::from(format!("/tmp/wasm_sandbox/pid_{}", id));
     create_dir_all(&process_root)?;
+
+    {
+        let mut table = fd_table.lock().unwrap();
+        // FD=3 => ephemeral root directory
+        table.entries[3] = Some(FDEntry {
+            buffer: Vec::new(),
+            read_ptr: 0,
+            is_directory: true,
+            is_preopen: true,
+            host_path: Some(process_root.to_string_lossy().into_owned()),
+        });
+    }
 
     let process_data = ProcessData {
         state: state.clone(),

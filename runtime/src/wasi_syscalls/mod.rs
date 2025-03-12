@@ -18,6 +18,9 @@ pub fn register(linker: &mut Linker<ProcessData>) -> Result<()> {
     linker.func_wrap("wasi_snapshot_preview1", "path_open", fs::wasi_path_open)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_readdir", fs::wasi_fd_readdir)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_close", fs::wasi_fd_close)?;
+    linker.func_wrap("wasi_snapshot_preview1", "fd_prestat_get", fd::wasi_fd_prestat_get)?;
+    linker.func_wrap("wasi_snapshot_preview1", "fd_prestat_dir_name", fd::wasi_fd_prestat_dir_name)?;
+
 
 
     // If you want them under 'env' or some other module, that is up to you:

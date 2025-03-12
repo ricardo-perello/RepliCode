@@ -199,6 +199,9 @@ pub fn wasi_path_open(
         table.entries[fd as usize] = Some(FDEntry {
             buffer,
             read_ptr: 0,
+            is_directory: metadata.is_dir(),
+            is_preopen: false, // normal open is not "preopen"
+            host_path: Some(canonical.to_string_lossy().into_owned()),
         });
         fd
     };
