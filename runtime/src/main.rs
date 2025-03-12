@@ -1,7 +1,6 @@
 use anyhow::Result;
 use log::{info, error, debug};
 use env_logger;
-use runtime::process::Process;
 mod consensus_input;
 mod runtime;
 mod wasi_syscalls;
@@ -19,19 +18,19 @@ fn main() -> Result<()> {
     debug!("Arguments: {:?}", args);
 
     // Spawn processes from WASM modules.
-    let mut processes = Vec::new();
+    let processes = Vec::new();
     
     match mode {
-        // "benchmark" => {
-        //     let consensus_file = "consensus/consensus_input.bin";
-        //     info!("Runtime: Running in benchmark mode with file: {}", consensus_file);
-        //     runtime::scheduler::run_scheduler_with_file(processes, consensus_file)?;
-        // },
+        "benchmark" => {
+            let consensus_file = "consensus/consensus_input.bin";
+            info!("Runtime: Running in benchmark mode with file: {}", consensus_file);
+            runtime::scheduler::run_scheduler_with_file(processes, consensus_file)?;
+        },
         "tcp" => {
             info!("Runtime: TCP mode: Connecting to consensus server at 127.0.0.1:9000");
             let mut stream = TcpStream::connect("127.0.0.1:9000")?;
             debug!("Connected to TCP server");
-            runtime::scheduler::run_scheduler_dynamic(processes, &mut stream)?;
+            runtime::scheduler::run_scheduler_interactive(processes, &mut stream)?;
         },
         _ => {
             error!("Runtime: Unknown mode: {}. Use benchmark or tcp.", mode);

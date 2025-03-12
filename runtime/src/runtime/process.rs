@@ -5,7 +5,7 @@ use std::{thread, fs};
 use std::path::PathBuf;
 use log::{debug, error, info};
 use crate::{
-    runtime::fd_table::{FDEntry, FDTable},
+    runtime::fd_table::FDTable,
     wasi_syscalls,
 };
 // In this example we define our own minimal versions of process state and block reasons.

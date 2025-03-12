@@ -1,201 +1,37 @@
 use anyhow::Result;
 use crate::{
-    consensus_input:: process_consensus_pipe,
+    consensus_input:: {process_consensus_pipe, process_consensus_file},
     runtime::{
         clock::GlobalClock,
         process::{BlockReason, Process, ProcessState},
     },
 };
-use std::{collections::VecDeque, fs::remove_dir_all};
+use std::{collections::VecDeque, fs};
 use std::io::Read;
 use log::{debug, error, info};
 use std::thread;
 use std::time::Duration;
 
-pub fn run_scheduler<F>(processes: Vec<Process>, mut consensus_input: F) -> Result<()>
+/// A dynamic scheduler that runs indefinitely and uses a generic consensus function.
+/// The consensus function receives a mutable vector of processes (which may be new or blocked)
+/// and updates their state based on external input.
+pub fn run_scheduler_dynamic<F>(processes: Vec<Process>, mut consensus_input: F) -> Result<()>
 where
     F: FnMut(&mut Vec<Process>) -> Result<()>,
 {
-    // Initialize the two queues.
-    // All processes start in the ready queue.
     let mut ready_queue: VecDeque<Process> = processes.into();
     let mut blocked_queue: VecDeque<Process> = VecDeque::new();
 
     debug!(
-        "Scheduler running on thread: {}",
-        thread::current().name().unwrap_or("scheduler")
-    );
-
-    // Main scheduling loop: run until both queues are empty.
-    while !ready_queue.is_empty() || !blocked_queue.is_empty() {
-        // Process all processes in the ready queue.
-        while let Some(proc) = ready_queue.pop_front() {
-            {
-                // Set the process state to Running.
-                let mut st = proc.data.state.lock().unwrap();
-                *st = ProcessState::Running;
-                proc.data.cond.notify_all();
-                info!(
-                    "Process {} marked as Running on thread: {}",
-                    proc.id,
-                    thread::current().name().unwrap_or("scheduler")
-                );
-            }
-
-            // Wait until the process is no longer Running.
-            {
-                let mut st = proc.data.state.lock().unwrap();
-                while *st == ProcessState::Running {
-                    debug!(
-                        "Scheduler waiting for process {} (current state: {:?})",
-                        proc.id, *st
-                    );
-                    st = proc.data.cond.wait(st).unwrap();
-                }
-            }
-
-            // Check the new state of the process.
-            let current_state = { *proc.data.state.lock().unwrap() };
-
-            match current_state {
-                ProcessState::Finished => {
-                    // Join the thread and discard the process.
-                    let _ = proc.thread.join();
-                    if let Err(e) = remove_dir_all(&proc.data.root_path) {
-                        error!("Failed to remove dir for process {}: {}", proc.id, e);
-                    }
-                    info!("Process {} finished and joined.", proc.id);
-                }
-                ProcessState::Ready => {
-                    // Process yielded: push it to the back of the ready queue.
-                    info!("Process {} yielded; moving it to Ready queue.", proc.id);
-                    ready_queue.push_back(proc);
-                }
-                ProcessState::Blocked => {
-                    // Process is blocked: push it into the blocked queue.
-                    info!("Process {} blocked; moving it to Blocked queue.", proc.id);
-                    blocked_queue.push_back(proc);
-                }
-                ProcessState::Running => {
-                    // This should never occur since we waited until it was not Running.
-                    error!("Process {} still Running unexpectedly.", proc.id);
-                }
-            }
-        }
-
-        // If there are no ready processes but some are blocked, call consensus input
-        // to update process states and then try to unblock processes.
-        if ready_queue.is_empty() && !blocked_queue.is_empty() {
-            // Combine all processes to update their states.
-            let mut all_processes: Vec<Process> = ready_queue
-                .drain(..)
-                .chain(blocked_queue.drain(..))
-                .collect();
-            consensus_input(&mut all_processes)?;
-            info!("No ready processes; consensus input updated process states.");
-
-            // Re-split the processes into ready and blocked queues.
-            for proc in all_processes.into_iter() {
-                let state = { *proc.data.state.lock().unwrap() };
-                match state {
-                    ProcessState::Ready => ready_queue.push_back(proc),
-                    ProcessState::Blocked => blocked_queue.push_back(proc),
-                    ProcessState::Finished => {
-                        let _ = proc.thread.join();
-                        info!("Process {} finished and joined.", proc.id);
-                    }
-                    ProcessState::Running => {
-                        error!(
-                            "Process {} still Running unexpectedly after consensus input.",
-                            proc.id
-                        );
-                    }
-                }
-            }
-
-            // Next, examine each blocked process to see if it can be unblocked.
-            let mut still_blocked = VecDeque::new();
-            while let Some(proc) = blocked_queue.pop_front() {
-                let unblocked = {
-                    let reason = proc.data.block_reason.lock().unwrap().clone();
-                    match reason {
-                        Some(BlockReason::StdinRead) => {
-                            let fd_has_input = {
-                                let fd_table = proc.data.fd_table.lock().unwrap();
-                                fd_table.has_pending_input(0)
-                            };
-                            fd_has_input
-                        }
-                        Some(BlockReason::Timeout { resume_after }) => {
-                            GlobalClock::now() >= resume_after
-                        }
-                        // Add additional conditions here if needed.
-                        _ => false,
-                    }
-                };
-
-                if unblocked {
-                    {
-                        let mut st = proc.data.state.lock().unwrap();
-                        *st = ProcessState::Ready;
-                    }
-                    {
-                        let mut reason = proc.data.block_reason.lock().unwrap();
-                        *reason = None;
-                    }
-                    proc.data.cond.notify_all();
-                    info!(
-                        "Process {} unblocked and moved to Ready queue on thread: {}",
-                        proc.id,
-                        thread::current().name().unwrap_or("scheduler")
-                    );
-                    ready_queue.push_back(proc);
-                } else {
-                    still_blocked.push_back(proc);
-                }
-            }
-            blocked_queue = still_blocked;
-
-            // If still no process is ready, sleep briefly before trying again.
-            if ready_queue.is_empty() {
-                debug!("No processes unblocked; scheduler sleeping briefly.");
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
-    }
-    Ok(())
-}
-
-// pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) -> Result<()> {
-//     run_scheduler(processes, |processes| {
-//         // Use the existing process_consensus_file function.
-//         process_consensus_file(consensus_file, processes)
-//     })
-// }
-
-// // /// Wrapper for interactive mode using a live consensus pipe/socket.
-pub fn run_scheduler_interactive<R: Read>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
-    run_scheduler(processes, |processes| {
-        process_consensus_pipe(consensus_pipe, processes)
-    })
-}
-
-/// A dynamic scheduler that runs indefinitely.
-/// When both the ready and blocked queues are empty, it calls the consensus input
-/// to check for new processes (or other events) and then resumes scheduling.
-pub fn run_scheduler_dynamic<R: std::io::Read>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
-    let mut ready_queue: VecDeque<Process> = processes.into();
-    let mut blocked_queue: VecDeque<Process> = VecDeque::new();
-
-    debug!(
-        "Scheduler running on thread: {}",
+        "Dynamic scheduler running on thread: {}",
         thread::current().name().unwrap_or("scheduler")
     );
 
     loop {
-        // Process all processes in the ready queue.
+        // Process all ready processes.
         while let Some(proc) = ready_queue.pop_front() {
             {
+                // Set process state to Running and notify.
                 let mut st = proc.data.state.lock().unwrap();
                 *st = ProcessState::Running;
                 proc.data.cond.notify_all();
@@ -211,63 +47,55 @@ pub fn run_scheduler_dynamic<R: std::io::Read>(processes: Vec<Process>, consensu
                 let mut st = proc.data.state.lock().unwrap();
                 while *st == ProcessState::Running {
                     debug!(
-                        "Scheduler waiting for process {} (current state: {:?})",
+                        "Dynamic scheduler waiting for process {} (state: {:?})",
                         proc.id, *st
                     );
                     st = proc.data.cond.wait(st).unwrap();
                 }
             }
 
-            // Check the new state of the process.
+            // Check new state and decide where to enqueue.
             let current_state = { *proc.data.state.lock().unwrap() };
-
             match current_state {
                 ProcessState::Finished => {
-                    // Join the thread and discard the process.
                     let _ = proc.thread.join();
-                    if let Err(e) = remove_dir_all(&proc.data.root_path) {
+                    if let Err(e) = fs::remove_dir_all(&proc.data.root_path) {
                         error!("Failed to remove dir for process {}: {}", proc.id, e);
                     }
                     info!("Process {} finished and joined.", proc.id);
                 }
                 ProcessState::Ready => {
-                    // Process yielded: push it to the back of the ready queue.
                     info!("Process {} yielded; moving it to Ready queue.", proc.id);
                     ready_queue.push_back(proc);
                 }
                 ProcessState::Blocked => {
-                    // Process is blocked: push it into the blocked queue.
                     info!("Process {} blocked; moving it to Blocked queue.", proc.id);
                     blocked_queue.push_back(proc);
                 }
                 ProcessState::Running => {
-                    // This should never occur since we waited until it was not Running.
                     error!("Process {} still Running unexpectedly.", proc.id);
                 }
             }
         }
 
-        // Check if we need to call consensus or try to unblock processes
+        // When no process is ready, try to update states via the consensus input.
         if ready_queue.is_empty() {
-            // If both queues are empty, check consensus for new processes
             if blocked_queue.is_empty() {
                 debug!("No processes in queue; waiting for consensus input.");
-                let mut vec_queue: Vec<_> = Vec::new();
-                process_consensus_pipe(consensus_pipe, &mut vec_queue)?;
-                ready_queue.extend(vec_queue);
+                let mut new_processes = Vec::new();
+                consensus_input(&mut new_processes)?;
+                ready_queue.extend(new_processes);
                 if ready_queue.is_empty() {
                     thread::sleep(Duration::from_millis(10));
                     continue;
                 }
-            } 
-            // If there are blocked processes but no ready ones
-            else {
-                // Combine all processes to update their states from consensus
+            } else {
+                // Combine blocked processes and update their states.
                 let mut all_processes: Vec<Process> = blocked_queue.drain(..).collect();
-                process_consensus_pipe(consensus_pipe, &mut all_processes)?;
+                consensus_input(&mut all_processes)?;
                 info!("All processes blocked; consensus input updated process states.");
 
-                // Re-split the processes into ready and blocked queues
+                // Re-split processes based on new state.
                 for proc in all_processes.into_iter() {
                     let state = { *proc.data.state.lock().unwrap() };
                     match state {
@@ -278,15 +106,12 @@ pub fn run_scheduler_dynamic<R: std::io::Read>(processes: Vec<Process>, consensu
                             info!("Process {} finished and joined.", proc.id);
                         }
                         ProcessState::Running => {
-                            error!(
-                                "Process {} still Running unexpectedly after consensus input.",
-                                proc.id
-                            );
+                            error!("Process {} still Running unexpectedly after consensus input.", proc.id);
                         }
                     }
                 }
 
-                // Try to unblock processes based on their block reasons
+                // Try to unblock processes based on their block reasons.
                 let mut still_blocked = VecDeque::new();
                 while let Some(proc) = blocked_queue.pop_front() {
                     let unblocked = {
@@ -299,10 +124,7 @@ pub fn run_scheduler_dynamic<R: std::io::Read>(processes: Vec<Process>, consensu
                                 };
                                 fd_has_input
                             }
-                            Some(BlockReason::Timeout { resume_after }) => {
-                                GlobalClock::now() >= resume_after
-                            }
-                            // Add additional conditions here if needed.
+                            Some(BlockReason::Timeout { resume_after }) => GlobalClock::now() >= resume_after,
                             _ => false,
                         }
                     };
@@ -317,10 +139,7 @@ pub fn run_scheduler_dynamic<R: std::io::Read>(processes: Vec<Process>, consensu
                             *reason = None;
                         }
                         proc.data.cond.notify_all();
-                        info!(
-                            "Process {} unblocked and moved to Ready queue.",
-                            proc.id
-                        );
+                        info!("Process {} unblocked and moved to Ready queue.", proc.id);
                         ready_queue.push_back(proc);
                     } else {
                         still_blocked.push_back(proc);
@@ -328,7 +147,6 @@ pub fn run_scheduler_dynamic<R: std::io::Read>(processes: Vec<Process>, consensu
                 }
                 blocked_queue = still_blocked;
 
-                // If still no process is ready, sleep briefly before trying again
                 if ready_queue.is_empty() {
                     debug!("No processes unblocked; scheduler sleeping briefly.");
                     thread::sleep(Duration::from_millis(10));
@@ -337,3 +155,176 @@ pub fn run_scheduler_dynamic<R: std::io::Read>(processes: Vec<Process>, consensu
         }
     }
 }
+
+
+pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) -> Result<()> {
+    run_scheduler_dynamic(processes, |processes| {
+        // Use the existing process_consensus_file function.
+        process_consensus_file(consensus_file, processes)
+    })
+}
+
+// // /// Wrapper for interactive mode using a live consensus pipe/socket.
+pub fn run_scheduler_interactive<R: Read>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
+    run_scheduler_dynamic(processes, |processes| {
+        process_consensus_pipe(consensus_pipe, processes)
+    })
+}
+
+// /// A dynamic scheduler that runs indefinitely.
+// /// When both the ready and blocked queues are empty, it calls the consensus input
+// /// to check for new processes (or other events) and then resumes scheduling.
+// pub fn run_scheduler_dynamic<R: std::io::Read>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
+//     let mut ready_queue: VecDeque<Process> = processes.into();
+//     let mut blocked_queue: VecDeque<Process> = VecDeque::new();
+
+//     debug!(
+//         "Scheduler running on thread: {}",
+//         thread::current().name().unwrap_or("scheduler")
+//     );
+
+//     loop {
+//         // Process all processes in the ready queue.
+//         while let Some(proc) = ready_queue.pop_front() {
+//             {
+//                 let mut st = proc.data.state.lock().unwrap();
+//                 *st = ProcessState::Running;
+//                 proc.data.cond.notify_all();
+//                 info!(
+//                     "Process {} set to Running on thread: {}",
+//                     proc.id,
+//                     thread::current().name().unwrap_or("scheduler")
+//                 );
+//             }
+
+//             // Wait until the process is no longer Running.
+//             {
+//                 let mut st = proc.data.state.lock().unwrap();
+//                 while *st == ProcessState::Running {
+//                     debug!(
+//                         "Scheduler waiting for process {} (current state: {:?})",
+//                         proc.id, *st
+//                     );
+//                     st = proc.data.cond.wait(st).unwrap();
+//                 }
+//             }
+
+//             // Check the new state of the process.
+//             let current_state = { *proc.data.state.lock().unwrap() };
+
+//             match current_state {
+//                 ProcessState::Finished => {
+//                     // Join the thread and discard the process.
+//                     let _ = proc.thread.join();
+//                     if let Err(e) = remove_dir_all(&proc.data.root_path) {
+//                         error!("Failed to remove dir for process {}: {}", proc.id, e);
+//                     }
+//                     info!("Process {} finished and joined.", proc.id);
+//                 }
+//                 ProcessState::Ready => {
+//                     // Process yielded: push it to the back of the ready queue.
+//                     info!("Process {} yielded; moving it to Ready queue.", proc.id);
+//                     ready_queue.push_back(proc);
+//                 }
+//                 ProcessState::Blocked => {
+//                     // Process is blocked: push it into the blocked queue.
+//                     info!("Process {} blocked; moving it to Blocked queue.", proc.id);
+//                     blocked_queue.push_back(proc);
+//                 }
+//                 ProcessState::Running => {
+//                     // This should never occur since we waited until it was not Running.
+//                     error!("Process {} still Running unexpectedly.", proc.id);
+//                 }
+//             }
+//         }
+
+//         // Check if we need to call consensus or try to unblock processes
+//         if ready_queue.is_empty() {
+//             // If both queues are empty, check consensus for new processes
+//             if blocked_queue.is_empty() {
+//                 debug!("No processes in queue; waiting for consensus input.");
+//                 let mut vec_queue: Vec<_> = Vec::new();
+//                 process_consensus_pipe(consensus_pipe, &mut vec_queue)?;
+//                 ready_queue.extend(vec_queue);
+//                 if ready_queue.is_empty() {
+//                     thread::sleep(Duration::from_millis(10));
+//                     continue;
+//                 }
+//             } 
+//             // If there are blocked processes but no ready ones
+//             else {
+//                 // Combine all processes to update their states from consensus
+//                 let mut all_processes: Vec<Process> = blocked_queue.drain(..).collect();
+//                 process_consensus_pipe(consensus_pipe, &mut all_processes)?;
+//                 info!("All processes blocked; consensus input updated process states.");
+
+//                 // Re-split the processes into ready and blocked queues
+//                 for proc in all_processes.into_iter() {
+//                     let state = { *proc.data.state.lock().unwrap() };
+//                     match state {
+//                         ProcessState::Ready => ready_queue.push_back(proc),
+//                         ProcessState::Blocked => blocked_queue.push_back(proc),
+//                         ProcessState::Finished => {
+//                             let _ = proc.thread.join();
+//                             info!("Process {} finished and joined.", proc.id);
+//                         }
+//                         ProcessState::Running => {
+//                             error!(
+//                                 "Process {} still Running unexpectedly after consensus input.",
+//                                 proc.id
+//                             );
+//                         }
+//                     }
+//                 }
+
+//                 // Try to unblock processes based on their block reasons
+//                 let mut still_blocked = VecDeque::new();
+//                 while let Some(proc) = blocked_queue.pop_front() {
+//                     let unblocked = {
+//                         let reason = proc.data.block_reason.lock().unwrap().clone();
+//                         match reason {
+//                             Some(BlockReason::StdinRead) => {
+//                                 let fd_has_input = {
+//                                     let fd_table = proc.data.fd_table.lock().unwrap();
+//                                     fd_table.has_pending_input(0)
+//                                 };
+//                                 fd_has_input
+//                             }
+//                             Some(BlockReason::Timeout { resume_after }) => {
+//                                 GlobalClock::now() >= resume_after
+//                             }
+//                             // Add additional conditions here if needed.
+//                             _ => false,
+//                         }
+//                     };
+
+//                     if unblocked {
+//                         {
+//                             let mut st = proc.data.state.lock().unwrap();
+//                             *st = ProcessState::Ready;
+//                         }
+//                         {
+//                             let mut reason = proc.data.block_reason.lock().unwrap();
+//                             *reason = None;
+//                         }
+//                         proc.data.cond.notify_all();
+//                         info!(
+//                             "Process {} unblocked and moved to Ready queue.",
+//                             proc.id
+//                         );
+//                         ready_queue.push_back(proc);
+//                     } else {
+//                         still_blocked.push_back(proc);
+//                     }
+//                 }
+//                 blocked_queue = still_blocked;
+
+//                 // If still no process is ready, sleep briefly before trying again
+//                 if ready_queue.is_empty() {
+//                     debug!("No processes unblocked; scheduler sleeping briefly.");
+//                     thread::sleep(Duration::from_millis(10));
+//                 }
+//             }
+//         }
+//     }
+// }
