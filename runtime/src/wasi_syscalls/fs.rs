@@ -14,6 +14,7 @@ fn io_err_to_wasi_errno(e: &io::Error) -> i32 {
     match e.kind() {
         NotFound => 2,           // e.g. __WASI_ERRNO_NOENT
         PermissionDenied => 13,  // e.g. __WASI_ERRNO_ACCES
+        AlreadyExists => 20,     // __WASI_ERRNO_EXIST
         _ => 1,                  // catch-all or __WASI_ERRNO_IO
     }
 }
@@ -37,6 +38,228 @@ fn block_process_for_fileio(caller: &mut Caller<'_, ProcessData>) {
     }
 }
 
+/// Unlinks (deletes) a non-directory file in the sandbox.
+/// Under WASI, `unlink(...)` calls `path_unlink_file`.
+pub fn wasi_path_unlink_file(
+    mut caller: wasmtime::Caller<'_, ProcessData>,
+    dirfd: i32,
+    path_ptr: i32,
+    path_len: i32,
+) -> i32 {
+    use wasmtime::Extern;
+    use log::error;
+
+    // 1) Extract the path string from Wasm memory
+    let memory = match caller.get_export("memory") {
+        Some(Extern::Memory(mem)) => mem,
+        Some(Extern::SharedMemory(_)) => {
+            error!("path_unlink_file: SharedMemory not supported");
+            return 1;
+        },
+        Some(Extern::Func(_)) | Some(Extern::Global(_)) | Some(Extern::Table(_)) | None => {
+            error!("path_unlink_file: Memory not found");
+            return 1;
+        }
+    };
+
+    let data = memory.data(&caller);
+    let start = path_ptr as usize;
+    let end = start + (path_len as usize);
+    if end > data.len() {
+        error!("path_unlink_file: path out of bounds");
+        return 1;
+    }
+    let path_str = match std::str::from_utf8(&data[start..end]) {
+        Ok(s) => s,
+        Err(_) => {
+            error!("path_unlink_file: invalid UTF-8");
+            return 1;
+        }
+    };
+
+    // 2) As with other calls, figure out the directory FD or just always use
+    //    the process's root_path. If your code uses dirfd properly, you'd
+    //    look it up in the FD table. For simplicity, we do:
+    let root_path = {
+        let pd = caller.data();
+        pd.root_path.clone()
+    };
+
+    // 3) Construct and canonicalize the path in the sandbox
+    let joined = root_path.join(path_str.trim_start_matches('/'));
+    let canonical = match joined.canonicalize() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("path_unlink_file: canonicalize error: {}", e);
+            return 2; // e.g., WASI_ENOENT
+        }
+    };
+    if !canonical.starts_with(&root_path) {
+        error!("path_unlink_file: attempt to escape sandbox root!");
+        return 13; // e.g. WASI_EACCES
+    }
+
+    // 4) Actually remove the file
+    match std::fs::remove_file(&canonical) {
+        Ok(_) => 0, // success
+        Err(e) => {
+            error!("path_unlink_file: failed to unlink file: {}", e);
+            io_err_to_wasi_errno(&e)
+        }
+    }
+}
+
+/// Removes (deletes) a directory in the sandboxed filesystem.
+/// In WASI, `rmdir()` calls `path_remove_directory`.
+pub fn wasi_path_remove_directory(
+    mut caller: wasmtime::Caller<'_, ProcessData>,
+    dirfd: i32,
+    path_ptr: i32,
+    path_len: i32,
+) -> i32 {
+    use wasmtime::Extern;
+    use log::error;
+
+    // 1) Extract the path string from Wasm memory
+    let memory = match caller.get_export("memory") {
+        Some(Extern::Memory(mem)) => mem,
+        Some(Extern::SharedMemory(_)) => {
+            error!("path_remove_directory: SharedMemory not supported");
+            return 1; 
+        },
+        Some(Extern::Func(_)) | Some(Extern::Global(_)) | Some(Extern::Table(_)) | None => {
+            error!("path_remove_directory: Memory not found");
+            return 1;
+        }
+    };
+
+    let data = memory.data(&caller);
+    let start = path_ptr as usize;
+    let end = start + (path_len as usize);
+    if end > data.len() {
+        error!("path_remove_directory: path out of bounds");
+        return 1;
+    }
+    let path_str = match std::str::from_utf8(&data[start..end]) {
+        Ok(s) => s,
+        Err(_) => {
+            error!("path_remove_directory: invalid UTF-8");
+            return 1;
+        }
+    };
+
+    // 2) For a strict WASI approach, interpret dirfd. If `dirfd` is a preopen, 
+    //    we join that path. Or, as your code does, you might just always use
+    //    the process's `root_path` to keep it simple:
+    let root_path = {
+        let pd = caller.data();
+        pd.root_path.clone()
+    };
+
+    // 3) Construct a sandboxed absolute path
+    let joined = root_path.join(path_str.trim_start_matches('/'));
+    let canonical = match joined.canonicalize() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("path_remove_directory: canonicalize error: {}", e);
+            return 2; // e.g. WASI_ENOENT
+        }
+    };
+    if !canonical.starts_with(&root_path) {
+        error!("path_remove_directory: attempt to escape sandbox root!");
+        return 13; // e.g. WASI_EACCES
+    }
+
+    // 4) Actually remove the directory
+    match std::fs::remove_dir(&canonical) {
+        Ok(_) => 0, // success
+        Err(e) => {
+            error!("path_remove_directory: failed to remove dir: {}", e);
+            io_err_to_wasi_errno(&e) // same helper you used in path_open
+        }
+    }
+}
+
+/// Creates a new directory in the sandbox.
+/// In WASI, signature is something like:
+///   __wasi_errno_t path_create_directory(
+///       __wasi_fd_t fd,
+///       const uint8_t *path,
+///       size_t path_len
+///   );
+///
+/// We'll interpret `fd` as the directory FD (often 3 for the preopened root).
+pub fn wasi_path_create_directory(
+    mut caller: wasmtime::Caller<'_, ProcessData>,
+    dirfd: i32,
+    path_ptr: i32,
+    path_len: i32,
+) -> i32 {
+    use wasmtime::Extern;
+    use log::error;
+
+    // 1) Extract the path string from Wasm memory
+    let memory = match caller.get_export("memory") {
+        Some(Extern::Memory(mem)) => mem,
+        Some(Extern::SharedMemory(_)) => {
+            error!("path_create_directory: SharedMemory not supported");
+            return 1; // or a WASI errno
+        },
+        Some(Extern::Func(_)) | Some(Extern::Global(_)) | Some(Extern::Table(_)) | None => {
+            error!("path_create_directory: Memory not found");
+            return 1;
+        }
+    };
+
+    let data = memory.data(&caller);
+    let start = path_ptr as usize;
+    let end = start + (path_len as usize);
+    if end > data.len() {
+        error!("path_create_directory: path out of bounds");
+        return 1;
+    }
+    let path_str = match std::str::from_utf8(&data[start..end]) {
+        Ok(s) => s,
+        Err(_) => {
+            error!("path_create_directory: invalid UTF-8");
+            return 1;
+        }
+    };
+
+    // 2) For a strict WASI approach, you might check if dirfd == 3, or
+    //    interpret dirfd in your FD table. But for simplicity, let's
+    //    always use the process's `root_path`:
+    let root_path = {
+        let pd = caller.data();
+        pd.root_path.clone()
+    };
+
+    // 3) Build a canonical path in the sandbox
+    let joined = root_path.join(path_str.trim_start_matches('/'));
+    let canonical = match joined.canonicalize() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("path_create_directory: canonicalize error: {}", e);
+            return 2; // e.g. WASI_ENOENT
+        }
+    };
+    // Ensure we don't escape the sandbox
+    if !canonical.starts_with(&root_path) {
+        error!("path_create_directory: attempt to escape sandbox root!");
+        return 13; // e.g. WASI_EACCES
+    }
+
+    // 4) Attempt to create the directory
+    match std::fs::create_dir(&canonical) {
+        Ok(_) => 0, // success
+        Err(e) => {
+            error!("path_create_directory: failed to create dir: {}", e);
+            io_err_to_wasi_errno(&e)  // map to WASI code
+        }
+    }
+}
+
+
 pub fn wasi_fd_close(caller: Caller<'_, ProcessData>, fd: i32) -> i32 {
     println!("fd_close: closing fd {}", fd);
     let process_data = caller.data();
@@ -57,6 +280,7 @@ pub fn wasi_fd_close(caller: Caller<'_, ProcessData>, fd: i32) -> i32 {
 pub fn wasi_path_open(
     mut caller: Caller<'_, ProcessData>,
     dirfd: i32,
+    dirflags: i32, 
     path_ptr: i32,
     path_len: i32,
     oflags: i32,
