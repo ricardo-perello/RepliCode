@@ -28,10 +28,25 @@ pub struct FDTable {
 
 impl FDTable {
     pub fn new() -> Self {
-        // Initialize FDTable with all entries = None
-        FDTable {
+        let mut table = FDTable {
             entries: Default::default(),
-        }
+        };
+        
+        // Initialize standard file descriptors (stdin, stdout, stderr)
+        table.entries[0] = Some(FDEntry {  // stdin
+            buffer: Vec::new(),
+            read_ptr: 0,
+        });
+        table.entries[1] = Some(FDEntry {  // stdout
+            buffer: Vec::new(),
+            read_ptr: 0,
+        });
+        table.entries[2] = Some(FDEntry {  // stderr
+            buffer: Vec::new(),
+            read_ptr: 0,
+        });
+        
+        table
     }
 
     pub fn has_pending_input(&self, fd: i32) -> bool {
