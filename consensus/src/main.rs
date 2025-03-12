@@ -20,15 +20,15 @@ fn main() -> io::Result<()> {
     let mode = if args.len() > 1 { args[1].as_str() } else { "benchmark" };
 
     match mode {
-        "benchmark" => modes::run_benchmark_mode(),
-        "hybrid" => {
-            if args.len() < 3 {
-                eprintln!("Hybrid mode requires an input file path as the second argument.");
-                std::process::exit(1);
-            }
-            let input_file_path = &args[2];
-            modes::run_hybrid_mode(input_file_path)
-        },
+        // "benchmark" => modes::run_benchmark_mode(),
+        // "hybrid" => {
+        //     if args.len() < 3 {
+        //         eprintln!("Hybrid mode requires an input file path as the second argument.");
+        //         std::process::exit(1);
+        //     }
+        //     let input_file_path = &args[2];
+        //     modes::run_hybrid_mode(input_file_path)
+        // },
         "tcp" => modes::run_tcp_mode(),
         _ => {
             eprintln!("Unknown mode: {}. Use benchmark, hybrid, or tcp.", mode);

@@ -1,5 +1,7 @@
 use std::fmt;
 
+use log::debug;
+
 pub struct FDEntry {
     pub buffer: Vec<u8>,    // data waiting to be read
     pub read_ptr: usize,    // how far we've read from buffer
@@ -33,6 +35,7 @@ impl FDTable {
     }
 
     pub fn has_pending_input(&self, fd: i32) -> bool {
+        debug!("Checking FD {} for pending input", fd);
         if let Some(Some(entry)) = self.entries.get(fd as usize) {
             entry.read_ptr < entry.buffer.len()
         } else {
