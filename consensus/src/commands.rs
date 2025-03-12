@@ -1,4 +1,5 @@
 use std::io::Write;
+use log::error;
 
 /// High-level command variants.
 #[derive(Clone, Debug)]
@@ -12,7 +13,7 @@ pub enum Command {
 /// Reads a WASM file from disk.
 pub fn read_wasm_file(file_path: &str) -> Vec<u8> {
     std::fs::read(file_path).unwrap_or_else(|e| {
-        eprintln!("Error reading WASM file {}: {}", file_path, e);
+        error!("Error reading WASM file {}: {}", file_path, e);
         Vec::new()
     })
 }
@@ -49,7 +50,7 @@ pub fn parse_command(line: &str) -> Option<Command> {
         "msg" => {
             // "msg <pid> <message>"
             if tokens.len() < 3 {
-                eprintln!("Usage: msg <pid> <message>");
+                error!("Usage: msg <pid> <message>");
                 return None;
             }
             let pid = tokens[1].parse::<u64>().unwrap_or(0);
@@ -59,7 +60,7 @@ pub fn parse_command(line: &str) -> Option<Command> {
         "ftp" => {
             // "ftp <pid> <ftp_command>"
             if tokens.len() < 3 {
-                eprintln!("Usage: ftp <pid> <ftp_command>");
+                error!("Usage: ftp <pid> <ftp_command>");
                 return None;
             }
             let pid = tokens[1].parse::<u64>().unwrap_or(0);
@@ -69,14 +70,14 @@ pub fn parse_command(line: &str) -> Option<Command> {
         "clock" => {
             // "clock <nanoseconds>"
             if tokens.len() < 2 {
-                eprintln!("Usage: clock <nanoseconds>");
+                error!("Usage: clock <nanoseconds>");
                 return None;
             }
             let delta = tokens[1].parse::<u64>().unwrap_or(0);
             Some(Command::Clock(delta))
         },
         _ => {
-            eprintln!("Unknown command. Use 'init', 'msg', 'ftp', or 'clock'.");
+            error!("Unknown command. Use 'init', 'msg', 'ftp', or 'clock'.");
             None
         }
     }

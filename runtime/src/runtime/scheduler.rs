@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crate::{
-    consensus_input::{process_consensus_file, process_consensus_pipe},
+    consensus_input:: process_consensus_pipe,
     runtime::{
         clock::GlobalClock,
         process::{BlockReason, Process, ProcessState},
@@ -166,16 +166,94 @@ where
     Ok(())
 }
 
-pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) -> Result<()> {
-    run_scheduler(processes, |processes| {
-        // Use the existing process_consensus_file function.
-        process_consensus_file(consensus_file, processes)
-    })
-}
+// pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) -> Result<()> {
+//     run_scheduler(processes, |processes| {
+//         // Use the existing process_consensus_file function.
+//         process_consensus_file(consensus_file, processes)
+//     })
+// }
 
-/// Wrapper for interactive mode using a live consensus pipe/socket.
+// // /// Wrapper for interactive mode using a live consensus pipe/socket.
 pub fn run_scheduler_interactive<R: Read>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
     run_scheduler(processes, |processes| {
         process_consensus_pipe(consensus_pipe, processes)
     })
+}
+
+/// A dynamic scheduler that runs indefinitely.
+/// When both the ready and blocked queues are empty, it calls the consensus input
+/// to check for new processes (or other events) and then resumes scheduling.
+pub fn run_scheduler_dynamic<R: std::io::Read>(mut processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
+    let mut ready_queue: VecDeque<Process> = processes.into();
+    let mut blocked_queue: VecDeque<Process> = VecDeque::new();
+
+    loop {
+        // If both queues are empty, check consensus for new processes.
+        if ready_queue.is_empty() && blocked_queue.is_empty() {
+            debug!("No processes in queue; waiting for consensus input.");
+            let mut vec_queue: Vec<_> = ready_queue.drain(..).collect();
+            process_consensus_pipe(consensus_pipe, &mut vec_queue)?;
+            ready_queue.extend(vec_queue);
+            if ready_queue.is_empty() {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+        }
+
+        // Process all processes in the ready queue.
+        while let Some(proc) = ready_queue.pop_front() {
+            // Signal the process to run (set its state to Running).
+            {
+                let mut st = proc.data.state.lock().unwrap();
+                *st = ProcessState::Running;
+                proc.data.cond.notify_all();
+                info!("Process {} set to Running", proc.id);
+            }
+            // Wait until the process yields or finishes.
+            {
+                let mut st = proc.data.state.lock().unwrap();
+                while *st == ProcessState::Running {
+                    debug!("Waiting for process {} to yield or finish", proc.id);
+                    st = proc.data.cond.wait(st).unwrap();
+                }
+            }
+            // Based on its new state, requeue or join the process.
+            let current_state = { *proc.data.state.lock().unwrap() };
+            match current_state {
+                ProcessState::Finished => {
+                    if let Err(e) = proc.thread.join() {
+                        error!("Error joining process {}: {:?}", proc.id, e);
+                    }
+                    info!("Process {} finished and joined", proc.id);
+                },
+                ProcessState::Ready => {
+                    info!("Process {} yielded; requeueing in ready queue", proc.id);
+                    ready_queue.push_back(proc);
+                },
+                ProcessState::Blocked => {
+                    info!("Process {} blocked; moving to blocked queue", proc.id);
+                    blocked_queue.push_back(proc);
+                },
+                _ => {
+                    error!("Process {} in unexpected state", proc.id);
+                }
+            }
+        }
+
+        // If the ready queue is empty but some processes are blocked,
+        // try to unblock them (this example does not include detailed unblocking logic).
+        if ready_queue.is_empty() && !blocked_queue.is_empty() {
+            let mut still_blocked = VecDeque::new();
+            while let Some(proc) = blocked_queue.pop_front() {
+                // Here you would add your unblocking conditions based on process.block_reason, etc.
+                // For now, we leave processes blocked.
+                still_blocked.push_back(proc);
+            }
+            blocked_queue = still_blocked;
+
+            if ready_queue.is_empty() {
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
 }

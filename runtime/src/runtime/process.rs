@@ -1,38 +1,21 @@
 use anyhow::Result;
-use log::{debug, error, info};
-use std::{
-    fmt, fs::create_dir_all, path::PathBuf, sync::{Arc, Condvar, Mutex}, thread
-};
 use wasmtime::{Engine, Module, Store, Linker};
-
+use std::sync::{Arc, Mutex, Condvar};
+use std::{thread, fs};
+use std::path::PathBuf;
+use log::{debug, error, info};
 use crate::{
     runtime::fd_table::{FDEntry, FDTable},
     wasi_syscalls,
 };
-
+// In this example we define our own minimal versions of process state and block reasons.
+// You can extend these as needed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProcessState {
-    Running,
     Ready,
+    Running,
     Blocked,
     Finished,
-}
-
-impl fmt::Display for ProcessState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl fmt::Display for BlockReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BlockReason::StdinRead => write!(f, "StdinRead"),
-            BlockReason::Timeout { resume_after } => write!(f, "Timeout until {:?}", resume_after),
-            BlockReason::FileIO => write!(f, "FileIO"),
-            BlockReason::NetworkIO => write!(f, "NetworkIO"),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,96 +31,96 @@ pub struct ProcessData {
     pub state: Arc<Mutex<ProcessState>>,
     pub cond: Arc<Condvar>,
     pub block_reason: Arc<Mutex<Option<BlockReason>>>,
+    // Assumes you have an FD table defined in a module called `fd_table`.
     pub fd_table: Arc<Mutex<FDTable>>,
     pub root_path: PathBuf,
 }
 
 pub struct Process {
-    pub id: u64, // Unique process ID
+    pub id: u64,
     pub thread: thread::JoinHandle<()>,
     pub data: ProcessData,
 }
 
-/// Spawns a new process from a WASM module and assigns it a unique ID.
-/// The spawned thread is given a name (e.g. "pid3").
-pub fn start_process(path: std::path::PathBuf, id: u64) -> Result<Process> {
-    debug!("Starting process with path: {:?} and id: {}", path, id);
+/// Creates a new process from a WASM binary (passed as a byte vector) and assigns it a unique ID.
+pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process> {
+    debug!("Starting process {} from WASM bytes", id);
     let mut config = wasmtime::Config::new();
+    debug!("WASM config created");
     config.consume_fuel(true);
     let engine = Engine::new(&config)?;
-    let module = Module::from_file(&engine, &path)?;
-    debug!("WASM module loaded from path: {:?}", path);
+    debug!("WASM engine created");
+    // Load the module from the in-memory bytes.
+    let module = Module::new(&engine, &wasm_bytes)?;
+    debug!("WASM module loaded from bytes");
 
-    // Initialize process state and FD table.
+    // Initialize process state and associated resources.
     let state = Arc::new(Mutex::new(ProcessState::Ready));
     let cond = Arc::new(Condvar::new());
-    let reason = Arc::new(Mutex::new(None));
+    let block_reason = Arc::new(Mutex::new(None));
     let fd_table = Arc::new(Mutex::new(FDTable::new()));
-    {
-        let mut table = fd_table.lock().unwrap();
-        // Reserve FD 0 for stdin.
-        table.entries[0] = Some(FDEntry {
-            buffer: Vec::new(),
-            read_ptr: 0,
-        });
-        debug!("FD 0 reserved for stdin");
-    }
-    let process_root = std::path::PathBuf::from(format!("/tmp/wasm_sandbox/pid_{}", id));
-    create_dir_all(&process_root)?;
+    let process_root = PathBuf::from(format!("/tmp/wasm_sandbox/pid_{}", id));
+    fs::create_dir_all(&process_root)?;
 
     let process_data = ProcessData {
         state: state.clone(),
         cond: cond.clone(),
-        block_reason: reason,
+        block_reason,
         fd_table,
         root_path: process_root,
     };
+
     let thread_data = process_data.clone();
     let thread = thread::Builder::new()
         .name(format!("pid{}", id))
         .spawn(move || {
-            debug!(
-                "Thread {:?} starting execution for process id: {}",
-                thread::current().name().unwrap_or("unknown"),
-                id
-            );
             let mut store = Store::new(&engine, thread_data);
+            // Set fuel (or other resource limits) as needed.
             let _ = store.set_fuel(2_000_000);
             let mut linker: Linker<ProcessData> = Linker::new(&engine);
-            wasi_syscalls::register(&mut linker).expect("Failed to register WASI syscalls");
+            if let Err(e) = wasi_syscalls::register(&mut linker) {
+                error!("Failed to register WASI syscalls: {:?}", e);
+                return;
+            }
             debug!("WASI syscalls registered");
-            let instance = linker
-                .instantiate(&mut store, &module)
-                .expect("Failed to instantiate module");
+
+            let instance = match linker.instantiate(&mut store, &module) {
+                Ok(inst) => inst,
+                Err(e) => {
+                    error!("Failed to instantiate module: {:?}", e);
+                    return;
+                }
+            };
             debug!("WASM module instantiated");
 
-            // Log that process initialization is complete.
-            debug!("Process id: {} initialization complete, ready to execute _start", id);
-
-            let start_func = instance
-                .get_typed_func::<(), ()>(&mut store, "_start")
-                .expect("Missing _start function");
-            debug!("_start function obtained");
-        
+            // Wait until the scheduler sets the process state to Running.
             {
                 let mut st = store.data().state.lock().unwrap();
                 while *st != ProcessState::Running {
-                    debug!("Waiting until process {} state is Running (current state: {:?})", id, *st);
                     st = store.data().cond.wait(st).unwrap();
                 }
             }
 
+            // Call the _start function.
+            let start_func = match instance.get_typed_func::<(), ()>(&mut store, "_start") {
+                Ok(func) => func,
+                Err(e) => {
+                    error!("Missing _start function: {:?}", e);
+                    return;
+                }
+            };
             if let Err(e) = start_func.call(&mut store, ()) {
                 error!("Error executing wasm: {:?}", e);
             }
+            // Mark process as Finished.
             {
                 let mut s = store.data().state.lock().unwrap();
                 *s = ProcessState::Finished;
             }
             store.data().cond.notify_all();
-            debug!("Process id: {} marked as Finished", id);
+            debug!("Process {} marked as Finished", id);
         })?;
-        //wait for thread to return then execute the next line
+
     info!("Started process with id {}", id);
     Ok(Process { id, thread, data: process_data })
 }

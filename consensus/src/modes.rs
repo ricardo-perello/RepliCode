@@ -4,6 +4,8 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use log::{debug, error, info};
+
 // use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
 use crate::record::write_record;
@@ -99,11 +101,11 @@ use crate::commands::{parse_command, Command};
 pub fn run_tcp_mode() -> io::Result<()> {
     // Consensus acts as the server: listen on port 9000.
     let listener = TcpListener::bind("127.0.0.1:9000")?;
-    eprintln!("TCP mode: Listening for runtime on 127.0.0.1:9000...");
+    info!("TCP mode: Listening for runtime on 127.0.0.1:9000...");
     
     // Accept a connection from the runtime.
     let (runtime_stream, addr) = listener.accept()?;
-    eprintln!("TCP mode: Accepted connection from runtime at {}.", addr);
+    info!("TCP mode: Accepted connection from runtime at {}", addr);
 
     // Shared buffer for accumulating messages.
     let shared_buffer = Arc::new(Mutex::new(Vec::new()));
@@ -125,9 +127,9 @@ pub fn run_tcp_mode() -> io::Result<()> {
                 }
                 
                 if let Err(e) = flush_stream.write_all(&buf) {
-                    eprintln!("Error writing to runtime: {}", e);
+                    error!("Error writing to runtime: {}", e);
                 } else {
-                    eprintln!("Flushed {} bytes to runtime.", buf.len());
+                    info!("Flushed {} bytes to runtime and clock record.", buf.len());
                 }
                 buf.clear();
             }
@@ -152,12 +154,12 @@ pub fn run_tcp_mode() -> io::Result<()> {
                     buf.extend(record);
                 }
                 Err(e) => {
-                    eprintln!("Error encoding command: {}", e);
+                    error!("Error encoding command: {}", e);
                 }
             }
         }
     }
 
-    eprintln!("TCP mode: Exiting.");
+    info!("TCP mode: Exiting.");
     Ok(())
 }
