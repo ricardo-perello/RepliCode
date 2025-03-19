@@ -33,7 +33,7 @@ fn main() -> Result<()> {
     debug!("WASM files to process: {:?}", wasm_files);
     
     for path in wasm_files{
-        let process = runtime::process::start_process(path, next_id)?;
+        let process = runtime::process::start_process(path, next_id, None, 1000000000)?; //TODO change max disk size to reasonable value
         info!("Runtime: Started process with pid {}", next_id);
         next_id += 1;
         processes.push(process);

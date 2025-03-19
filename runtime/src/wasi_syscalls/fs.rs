@@ -6,9 +6,6 @@ use wasmtime::Caller;
 use crate::runtime::process::{ProcessData, ProcessState, BlockReason};
 use crate::runtime::fd_table::{FDEntry, MAX_FDS};
 
-//TODO impose limit of disk allowed to avoid untrusted processes zipbombing the server
-
-/// A helper to map I/O errors to a WASI-like i32 code (simplified).
 fn io_err_to_wasi_errno(e: &io::Error) -> i32 {
     use io::ErrorKind::*;
     match e.kind() {
@@ -19,7 +16,7 @@ fn io_err_to_wasi_errno(e: &io::Error) -> i32 {
     }
 }
 
-/// This function is used to block a process for file I/O simulation, if desired.
+/// If you want to block for file I/O
 fn block_process_for_fileio(caller: &mut Caller<'_, ProcessData>) {
     {
         let mut state = caller.data().state.lock().unwrap();
@@ -31,15 +28,80 @@ fn block_process_for_fileio(caller: &mut Caller<'_, ProcessData>) {
         *reason = Some(BlockReason::FileIO);
         caller.data().cond.notify_all();
     }
-
     let mut state = caller.data().state.lock().unwrap();
     while *state != ProcessState::Running {
         state = caller.data().cond.wait(state).unwrap();
     }
 }
 
-/// Unlinks (deletes) a non-directory file in the sandbox.
-/// Under WASI, `unlink(...)` calls `path_unlink_file`.
+// ----------------------------------------------------------------------------
+// Disk-usage tracking support
+// ----------------------------------------------------------------------------
+
+/// Increment the process’s tracked usage by `bytes`. If the limit is exceeded,
+/// forcibly kill the process.
+fn usage_add(caller: &mut Caller<'_, ProcessData>, bytes: u64) -> Result<(), i32> {
+    // 1) Figure out if we exceed the limit
+    let over_limit = {
+        // Borrow immutably but only within this block
+        let pd = caller.data();  // &ProcessData
+        let mut usage = pd.current_disk_usage.lock().unwrap();
+        *usage = usage.saturating_add(bytes);
+
+        // Return boolean so we can decide outside
+        *usage > pd.max_disk_usage
+    }; // Immutable borrow ends here
+
+    // 2) If over the limit, kill the process
+    if over_limit {
+        eprintln!("Exceeded disk quota! Killing process...");
+        kill_process(caller);
+        // kill_process(...) never returns, because it panics
+    }
+
+    Ok(())
+}
+
+
+/// Decrement the process’s tracked usage by `bytes`. 
+fn usage_sub(caller: &mut Caller<'_, ProcessData>, bytes: u64) {
+    let pd = caller.data();
+    let mut usage = pd.current_disk_usage.lock().unwrap();
+    *usage = usage.saturating_sub(bytes);
+}
+
+/// If you remove a directory, or some other operation, and need to figure out how many
+/// bytes were in that directory, you can do a quick naive walk:
+fn get_dir_size(path: &Path) -> io::Result<u64> {
+    let mut size = 0;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            size += get_dir_size(&entry.path())?;
+        } else {
+            size += metadata.len();
+        }
+    }
+    Ok(size)
+}
+
+/// Kill the current process: mark it Finished, remove its directory, and panic.
+fn kill_process(caller: &mut Caller<'_, ProcessData>) -> ! {
+    {
+        let mut st = caller.data().state.lock().unwrap();
+        *st = ProcessState::Finished;
+    }
+    let pd = caller.data();
+    let _ = fs::remove_dir_all(&pd.root_path);
+    pd.cond.notify_all();
+    panic!("Process forcibly killed due to disk quota exceeded");
+}
+
+// ----------------------------------------------------------------------------
+// File/directory ops below
+// ----------------------------------------------------------------------------
+
 pub fn wasi_path_unlink_file(
     mut caller: wasmtime::Caller<'_, ProcessData>,
     dirfd: i32,
@@ -49,14 +111,9 @@ pub fn wasi_path_unlink_file(
     use wasmtime::Extern;
     use log::error;
 
-    // 1) Extract the path string from Wasm memory
     let memory = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
-        Some(Extern::SharedMemory(_)) => {
-            error!("path_unlink_file: SharedMemory not supported");
-            return 1;
-        },
-        Some(Extern::Func(_)) | Some(Extern::Global(_)) | Some(Extern::Table(_)) | None => {
+        _ => {
             error!("path_unlink_file: Memory not found");
             return 1;
         }
@@ -77,40 +134,43 @@ pub fn wasi_path_unlink_file(
         }
     };
 
-    // 2) As with other calls, figure out the directory FD or just always use
-    //    the process's root_path. If your code uses dirfd properly, you'd
-    //    look it up in the FD table. For simplicity, we do:
-    let root_path = {
-        let pd = caller.data();
-        pd.root_path.clone()
-    };
-
-    // 3) Construct and canonicalize the path in the sandbox
+    let root_path = caller.data().root_path.clone();
     let joined = root_path.join(path_str.trim_start_matches('/'));
     let canonical = match joined.canonicalize() {
         Ok(c) => c,
         Err(e) => {
             error!("path_unlink_file: canonicalize error: {}", e);
-            return 2; // e.g., WASI_ENOENT
+            return 2;
         }
     };
     if !canonical.starts_with(&root_path) {
         error!("path_unlink_file: attempt to escape sandbox root!");
-        return 13; // e.g. WASI_EACCES
+        return 13;
     }
 
-    // 4) Actually remove the file
-    match std::fs::remove_file(&canonical) {
-        Ok(_) => 0, // success
+    // NEW: get the file size before removing
+    let file_size = match fs::metadata(&canonical) {
+        Ok(m) => m.len(),
         Err(e) => {
-            error!("path_unlink_file: failed to unlink file: {}", e);
+            error!("path_unlink_file: metadata error: {}", e);
+            return io_err_to_wasi_errno(&e);
+        }
+    };
+
+    // remove the file
+    match fs::remove_file(&canonical) {
+        Ok(_) => {
+            // Decrement usage
+            usage_sub(&mut caller, file_size);
+            0
+        }
+        Err(e) => {
+            error!("path_unlink_file: failed to unlink: {}", e);
             io_err_to_wasi_errno(&e)
         }
     }
 }
 
-/// Removes (deletes) a directory in the sandboxed filesystem.
-/// In WASI, `rmdir()` calls `path_remove_directory`.
 pub fn wasi_path_remove_directory(
     mut caller: wasmtime::Caller<'_, ProcessData>,
     dirfd: i32,
@@ -120,14 +180,9 @@ pub fn wasi_path_remove_directory(
     use wasmtime::Extern;
     use log::error;
 
-    // 1) Extract the path string from Wasm memory
     let memory = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
-        Some(Extern::SharedMemory(_)) => {
-            error!("path_remove_directory: SharedMemory not supported");
-            return 1; 
-        },
-        Some(Extern::Func(_)) | Some(Extern::Global(_)) | Some(Extern::Table(_)) | None => {
+        _ => {
             error!("path_remove_directory: Memory not found");
             return 1;
         }
@@ -148,47 +203,43 @@ pub fn wasi_path_remove_directory(
         }
     };
 
-    // 2) For a strict WASI approach, interpret dirfd. If `dirfd` is a preopen, 
-    //    we join that path. Or, as your code does, you might just always use
-    //    the process's `root_path` to keep it simple:
-    let root_path = {
-        let pd = caller.data();
-        pd.root_path.clone()
-    };
-
-    // 3) Construct a sandboxed absolute path
+    let root_path = caller.data().root_path.clone();
     let joined = root_path.join(path_str.trim_start_matches('/'));
     let canonical = match joined.canonicalize() {
         Ok(c) => c,
         Err(e) => {
             error!("path_remove_directory: canonicalize error: {}", e);
-            return 2; // e.g. WASI_ENOENT
+            return 2;
         }
     };
     if !canonical.starts_with(&root_path) {
         error!("path_remove_directory: attempt to escape sandbox root!");
-        return 13; // e.g. WASI_EACCES
+        return 13;
     }
 
-    // 4) Actually remove the directory
-    match std::fs::remove_dir(&canonical) {
-        Ok(_) => 0, // success
+    // NEW: compute how many bytes were in that directory
+    let dir_size = match get_dir_size(&canonical) {
+        Ok(s) => s,
         Err(e) => {
-            error!("path_remove_directory: failed to remove dir: {}", e);
-            io_err_to_wasi_errno(&e) // same helper you used in path_open
+            error!("path_remove_directory: cannot compute dir size: {}", e);
+            return io_err_to_wasi_errno(&e);
+        }
+    };
+
+    // remove the directory
+    match fs::remove_dir(&canonical) {
+        Ok(_) => {
+            // Decrement usage
+            usage_sub(&mut caller, dir_size);
+            0
+        }
+        Err(e) => {
+            error!("path_remove_directory: failed: {}", e);
+            io_err_to_wasi_errno(&e)
         }
     }
 }
 
-/// Creates a new directory in the sandbox.
-/// In WASI, signature is something like:
-///   __wasi_errno_t path_create_directory(
-///       __wasi_fd_t fd,
-///       const uint8_t *path,
-///       size_t path_len
-///   );
-///
-/// We'll interpret `fd` as the directory FD (often 3 for the preopened root).
 pub fn wasi_path_create_directory(
     mut caller: wasmtime::Caller<'_, ProcessData>,
     dirfd: i32,
@@ -198,14 +249,9 @@ pub fn wasi_path_create_directory(
     use wasmtime::Extern;
     use log::error;
 
-    // 1) Extract the path string from Wasm memory
     let memory = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
-        Some(Extern::SharedMemory(_)) => {
-            error!("path_create_directory: SharedMemory not supported");
-            return 1; // or a WASI errno
-        },
-        Some(Extern::Func(_)) | Some(Extern::Global(_)) | Some(Extern::Table(_)) | None => {
+        _ => {
             error!("path_create_directory: Memory not found");
             return 1;
         }
@@ -226,35 +272,37 @@ pub fn wasi_path_create_directory(
         }
     };
 
-    // 2) For a strict WASI approach, you might check if dirfd == 3, or
-    //    interpret dirfd in your FD table. But for simplicity, let's
-    //    always use the process's `root_path`:
-    let root_path = {
-        let pd = caller.data();
-        pd.root_path.clone()
-    };
-
-    // 3) Build a canonical path in the sandbox
+    let root_path = caller.data().root_path.clone();
     let joined = root_path.join(path_str.trim_start_matches('/'));
     let canonical = match joined.canonicalize() {
         Ok(c) => c,
         Err(e) => {
-            error!("path_create_directory: canonicalize error: {}", e);
-            return 2; // e.g. WASI_ENOENT
+            // If canonicalize fails because it doesn't exist yet, we might 
+            // just use `joined.clone()`. For brevity, let's do:
+            joined
         }
     };
-    // Ensure we don't escape the sandbox
     if !canonical.starts_with(&root_path) {
         error!("path_create_directory: attempt to escape sandbox root!");
-        return 13; // e.g. WASI_EACCES
+        return 13;
     }
 
-    // 4) Attempt to create the directory
-    match std::fs::create_dir(&canonical) {
-        Ok(_) => 0, // success
+    match fs::create_dir(&canonical) {
+        Ok(_) => {
+            // For a directory, you can count a small overhead. 
+            // Or do metadata().len(). Let’s do that:
+            let dir_metadata_size = match fs::metadata(&canonical) {
+                Ok(md) => md.len(),
+                Err(_) => 4096, // fallback
+            };
+            if let Err(errno) = usage_add(&mut caller, dir_metadata_size) {
+                return errno; // process got killed
+            }
+            0
+        }
         Err(e) => {
-            error!("path_create_directory: failed to create dir: {}", e);
-            io_err_to_wasi_errno(&e)  // map to WASI code
+            error!("path_create_directory: failed: {}", e);
+            io_err_to_wasi_errno(&e)
         }
     }
 }
