@@ -1,10 +1,7 @@
 use anyhow::Result;
 use log::{debug, error, info};
 use std::{
-    fmt, fs::{create_dir_all, self},
-    path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
-    thread
+    fmt, fs::{self, create_dir_all}, panic::AssertUnwindSafe, path::{Path, PathBuf}, sync::{Arc, Condvar, Mutex}, thread
 };
 use wasmtime::{Engine, Module, Store, Linker};
 
@@ -70,8 +67,8 @@ pub struct Process {
 pub fn start_process(
     wasm_path: PathBuf,
     id: u64,
-    preload_dir: Option<&Path>,    
-    max_disk_bytes: u64,  
+    preload_dir: Option<&Path>,
+    max_disk_bytes: u64,
 ) -> Result<Process> {
     debug!("Starting process with path: {:?} and id: {}", wasm_path, id);
     let mut config = wasmtime::Config::new();
@@ -87,7 +84,7 @@ pub fn start_process(
     let fd_table = Arc::new(Mutex::new(FDTable::new()));
     {
         let mut table = fd_table.lock().unwrap();
-        // Reserve FD 0 for stdin
+        // Reserve FD=0 for stdin
         table.entries[0] = Some(FDEntry {
             buffer: Vec::new(),
             read_ptr: 0,
@@ -95,19 +92,23 @@ pub fn start_process(
             is_preopen: false,
             host_path: None,
         });
-        debug!("FD 0 reserved for stdin");
     }
 
-    // Create the sandbox directory
-    let process_root = PathBuf::from(format!("/tmp/wasm_sandbox/pid_{}", id));
-    create_dir_all(&process_root)?;
+    // Create the sandbox directory in "runtime/tmp/pid_<ID>"
+    let sandbox_base = PathBuf::from("runtime").join("tmp");
+    create_dir_all(&sandbox_base)?;
+    let process_root_rel = sandbox_base.join(format!("pid_{}", id));
+    create_dir_all(&process_root_rel)?;
+    let process_root = fs::canonicalize(&process_root_rel)?;
+    info!("Created sandbox for process {} at: {}", id, process_root.display());
 
-    // --- NEW: Optionally copy a preload directory into the sandbox ---
+    // Optionally preload a directory
     if let Some(src_dir) = preload_dir {
         copy_dir_recursive(src_dir, &process_root)?;
+        info!("Preloaded {:?} into sandbox for process {}", src_dir, id);
     }
 
-    // FD=3 => ephemeral root directory
+    // Preopen FD=3 => the root directory
     {
         let mut table = fd_table.lock().unwrap();
         table.entries[3] = Some(FDEntry {
@@ -119,69 +120,82 @@ pub fn start_process(
         });
     }
 
-    // Construct our ProcessData
     let process_data = ProcessData {
         state: state.clone(),
         cond: cond.clone(),
         block_reason: reason,
         fd_table,
-        root_path: process_root,
+        root_path: process_root.clone(),
         max_disk_usage: max_disk_bytes,
-        current_disk_usage: Arc::new(Mutex::new(0)), // start at 0
+        current_disk_usage: Arc::new(Mutex::new(0)),
     };
 
-    // Start the thread
-    let thread_data = process_data.clone();
+    let process_data_clone = process_data.clone();
     let thread = thread::Builder::new()
         .name(format!("pid{}", id))
         .spawn(move || {
-            debug!(
-                "Thread {:?} starting execution for process id: {}",
-                thread::current().name().unwrap_or("unknown"),
-                id
-            );
-            let mut store = Store::new(&engine, thread_data);
-            let _ = store.set_fuel(2_000_000);
-            let mut linker: Linker<ProcessData> = Linker::new(&engine);
-            wasi_syscalls::register(&mut linker).expect("Failed to register WASI syscalls");
-            debug!("WASI syscalls registered");
+            // Catch any panic to ensure we remove the sandbox directory.
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                debug!(
+                    "Thread {:?} starting execution for process id: {}",
+                    thread::current().name().unwrap_or("unknown"),
+                    id
+                );
+                let mut store = Store::new(&engine, process_data_clone.clone());
+                let _ = store.set_fuel(2_000_000);
 
-            // Instantiate
-            let instance = linker
-                .instantiate(&mut store, &module)
-                .expect("Failed to instantiate module");
-            debug!("WASM module instantiated");
+                let mut linker: Linker<ProcessData> = Linker::new(&engine);
+                wasi_syscalls::register(&mut linker).expect("Failed to register WASI syscalls");
+                debug!("WASI syscalls registered for process {}", id);
 
-            debug!("Process id: {} initialization complete, waiting to run _start", id);
+                // Instantiate the module
+                let instance = linker
+                    .instantiate(&mut store, &module)
+                    .expect("Failed to instantiate module");
 
-            // Wait until we are told to run
-            {
-                let mut st = store.data().state.lock().unwrap();
-                while *st != ProcessState::Running {
-                    debug!("Waiting for process {} state to be Running (current: {:?})", id, *st);
-                    st = store.data().cond.wait(st).unwrap();
+                debug!("Process {} instantiated; waiting for state=Running", id);
+                {
+                    let mut st = store.data().state.lock().unwrap();
+                    while *st != ProcessState::Running {
+                        st = store.data().cond.wait(st).unwrap();
+                    }
                 }
-            }
 
-            // Call _start
-            let start_func = instance
-                .get_typed_func::<(), ()>(&mut store, "_start")
-                .expect("Missing _start function");
+                // Call _start
+                let start_func = instance
+                    .get_typed_func::<(), ()>(&mut store, "_start")
+                    .expect("Missing _start function");
 
-            if let Err(e) = start_func.call(&mut store, ()) {
-                error!("Error executing wasm: {:?}", e);
+                if let Err(e) = start_func.call(&mut store, ()) {
+                    error!("Process {}: error executing _start: {:?}", id, e);
+                }
+
+                // Mark finished
+                {
+                    let mut s = store.data().state.lock().unwrap();
+                    *s = ProcessState::Finished;
+                }
+                store.data().cond.notify_all();
+
+                debug!("Process {} _start returned; removing sandbox dir now", id);
+                // Remove the directory immediately on normal exit
+                let _ = fs::remove_dir_all(&store.data().root_path);
+                debug!("Process {} directory removed", id);
+            }));
+
+            if let Err(panic_payload) = result {
+                // On panic, also remove the directory
+                error!("Process {} panicked! Cleaning up sandbox directory...", id);
+                let _ = fs::remove_dir_all(&process_data_clone.root_path);
+                process_data_clone.cond.notify_all();
+                std::panic::resume_unwind(panic_payload);
             }
-            {
-                let mut s = store.data().state.lock().unwrap();
-                *s = ProcessState::Finished;
-            }
-            store.data().cond.notify_all();
-            debug!("Process id: {} marked as Finished", id);
         })?;
 
     info!("Started process with id {}", id);
     Ok(Process { id, thread, data: process_data })
 }
+
 
 /// Recursively copy all files & subdirectories from `src` into `dst`.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {

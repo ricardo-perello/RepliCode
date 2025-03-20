@@ -1,4 +1,5 @@
 use std::fs;
+use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use wasmtime::Caller;
@@ -327,24 +328,22 @@ pub fn wasi_fd_close(caller: Caller<'_, ProcessData>, fd: i32) -> i32 {
 /// process's `root_path`.
 pub fn wasi_path_open(
     mut caller: Caller<'_, ProcessData>,
-    dirfd: i32,
-    dirflags: i32, 
+    _dirfd: i32,      // not used in this simplified implementation
+    _dirflags: i32,   // not used
     path_ptr: i32,
     path_len: i32,
     oflags: i32,
-    fs_rights_base: i64,
-    fs_rights_inheriting: i64,
-    fdflags: i32,
+    _fs_rights_base: i64,
+    _fs_rights_inheriting: i64,
+    _fdflags: i32,
     opened_fd_out: i32,
 ) -> i32 {
     println!(
-        "path_open: dirfd={}, oflags={}, base_rights={}, inheriting={}, fdflags={}",
-        dirfd, oflags, fs_rights_base, fs_rights_inheriting, fdflags
+        "path_open: oflags={}, opened_fd_out={}",
+        oflags, opened_fd_out
     );
 
-    //
-    // 1) Extract the path from Wasm memory
-    //
+    // 1) Extract path string from WASM memory.
     let memory = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(mem)) => mem,
         _ => {
@@ -353,7 +352,6 @@ pub fn wasi_path_open(
         }
     };
     let mem_data = memory.data(&caller);
-
     let start = path_ptr as usize;
     let end = start + (path_len as usize);
     if end > mem_data.len() {
@@ -367,121 +365,111 @@ pub fn wasi_path_open(
             return 1;
         }
     };
-
-    //
-    // 2) Clone just the `root_path` from the ProcessData, then drop the reference
-    //
-    // We *only* hold `pd` momentarily to read out what we need.
-    let root_path = {
-        let pd = caller.data(); // Immutable borrow
-        pd.root_path.clone()    // store locally
-    };
-    // `pd` reference is now dropped; no more overlap
-
     println!("path_open: requested path: '{}'", path_str);
 
-    //
-    // 3) Build and check canonical path wholly in local variables
-    //
+    // 2) Get sandbox (fake root) from ProcessData.
+    let root_path = caller.data().root_path.clone();
+
+    // 3) Join relative path to fake root.
     let joined_path = root_path.join(path_str.trim_start_matches('/'));
     let canonical = match joined_path.canonicalize() {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("path_open: canonicalize error {}", e);
-            return io_err_to_wasi_errno(&e);
-        }
+        Err(_) => joined_path.clone(),  // if it doesn't exist, use joined_path
     };
+
+    // 4) Ensure the path is inside the fake root.
     if !canonical.starts_with(&root_path) {
         eprintln!("path_open: attempt to escape sandbox root!");
-        return 13; // e.g. WASI_EACCES
+        return 13;
     }
 
-    // Metadata check (again, no reference to caller)
-    let metadata = match std::fs::metadata(&canonical) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("path_open: metadata error: {}", e);
-            return io_err_to_wasi_errno(&e);
-        }
-    };
-
-    //
-    // 4) Read the file or directory into a local buffer
-    //
-    let buffer = if metadata.is_dir() {
-        // read_dir scenario
-        let mut buf = Vec::new();
-        match std::fs::read_dir(&canonical) {
-            Ok(entries) => {
-                for entry_res in entries {
-                    match entry_res {
-                        Ok(dirent) => {
-                            let name = dirent.file_name();
-                            let name_str = name.to_string_lossy();
-                            buf.extend_from_slice(name_str.as_bytes());
-                            buf.push(b'\n');
-                        }
-                        Err(e) => {
-                            eprintln!("path_open: error reading directory entry: {}", e);
-                            return io_err_to_wasi_errno(&e);
+    // 5) Get metadata or create file if it does not exist and O_CREAT is set.
+    // Let's assume that O_CREAT is indicated by bit 0x1.
+    let o_creat = (oflags & 1) != 0;
+    let (is_dir, file_data) = match fs::metadata(&canonical) {
+        Ok(md) => {
+            if md.is_dir() {
+                // It's a directory: read directory entries.
+                let mut buf = Vec::new();
+                match fs::read_dir(&canonical) {
+                    Ok(entries) => {
+                        for entry_res in entries {
+                            if let Ok(dirent) = entry_res {
+                                let name = dirent.file_name();
+                                let name_str = name.to_string_lossy().into_owned();
+                                buf.extend_from_slice(name_str.as_bytes());
+                                buf.push(b'\n');
+                            }
                         }
                     }
+                    Err(e) => {
+                        eprintln!("path_open: read_dir error: {}", e);
+                        return io_err_to_wasi_errno(&e);
+                    }
                 }
+                (true, buf)
+            } else {
+                // It's a file: read file content.
+                let file_data = match fs::read(&canonical) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        eprintln!("path_open: Failed to read file: {}", e);
+                        return io_err_to_wasi_errno(&e);
+                    }
+                };
+                if file_data.len() > 1_000_000 {
+                    println!("path_open: File is large => blocking to simulate I/O wait");
+                    block_process_for_fileio(&mut caller);
+                }
+                (false, file_data)
             }
-            Err(e) => {
-                eprintln!("path_open: read_dir error: {}", e);
+        }
+        Err(e) => {
+            if o_creat {
+                // File doesn't exist, and O_CREAT is set: create it.
+                match OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .open(&canonical)
+                {
+                    Ok(_f) => {
+                        // File is now created (empty).
+                        let file_data = fs::read(&canonical).unwrap_or_default();
+                        // (Optionally: update disk usage here with file metadata overhead)
+                        (false, file_data)
+                    }
+                    Err(e) => {
+                        eprintln!("path_open: Failed to create file: {}", e);
+                        return io_err_to_wasi_errno(&e);
+                    }
+                }
+            } else {
+                eprintln!("path_open: metadata error: {}", e);
                 return io_err_to_wasi_errno(&e);
             }
         }
-        buf
-    } else {
-        // file scenario
-        let file_data = match std::fs::read(&canonical) {
-            Ok(fd) => fd,
-            Err(e) => {
-                eprintln!("path_open: Failed to open file: {}", e);
-                return io_err_to_wasi_errno(&e);
-            }
-        };
-
-        // If large, do blocking
-        if file_data.len() > 1_000_000 {
-            println!("path_open: File is large => blocking to simulate I/O wait");
-
-            // NOW we can block, but only after we've dropped all references.
-            // We do not hold a `caller.data()` reference here; no FD table lock.
-            block_process_for_fileio(&mut caller);
-        }
-
-        file_data
     };
 
-    //
-    // 5) Now we re-borrow `caller` to allocate an FD and store the buffer
-    //
+    // 6) Allocate a new FD and store the buffer.
     let fd = {
-        let pd = caller.data(); // re-borrow immutably
+        let pd = caller.data();
         let mut table = pd.fd_table.lock().unwrap();
-
         let fd = table.allocate_fd();
         if fd < 0 {
             eprintln!("path_open: No free FD available!");
-            return 76; // e.g. ENFILE or EMFILE
+            return 76;
         }
         table.entries[fd as usize] = Some(FDEntry {
-            buffer,
+            buffer: file_data,
             read_ptr: 0,
-            is_directory: metadata.is_dir(),
-            is_preopen: false, // normal open is not "preopen"
+            is_directory: is_dir,
+            is_preopen: false,
             host_path: Some(canonical.to_string_lossy().into_owned()),
         });
         fd
     };
-    // That scope is dropped, so the FD table lock is released now.
 
-    //
-    // 6) Write the newly opened FD back to Wasm memory
-    //
+    // 7) Write the FD back to WASM memory.
     {
         let mem_mut = memory.data_mut(&mut caller);
         let out_ptr = opened_fd_out as usize;

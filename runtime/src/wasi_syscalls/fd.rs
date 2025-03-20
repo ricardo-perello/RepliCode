@@ -166,41 +166,43 @@ pub fn wasi_fd_prestat_get(
     fd: i32,
     prestat_ptr: i32,
 ) -> i32 {
+    use wasmtime::Extern;
+    // Get memory export.
     let memory = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
-        Some(Extern::SharedMemory(_)) => {
-            error!("fd_read: SharedMemory not supported");
-            return 1;
-        },
-        Some(Extern::Func(_)) | Some(Extern::Table(_)) | Some(Extern::Global(_)) | None => {
-            return 1;
-        }
+        _ => return 1,
     };
 
-    let (is_preopen, is_dir, path_len) = {
+    // Retrieve the FD entry for fd. We assume that if it's preopen and a directory,
+    // we want to treat it as the current working directory.
+    let (is_preopen, is_dir) = {
         let pd = caller.data();
         let table = pd.fd_table.lock().unwrap();
-        if fd < 0 || fd as usize >= MAX_FDS {
-            return 8; // WASI_EBADF
+        if fd < 0 || (fd as usize) >= crate::runtime::fd_table::MAX_FDS {
+            return 8; // invalid FD
         }
         let entry = match &table.entries[fd as usize] {
             Some(e) => e,
             None => return 8,
         };
-        if !entry.is_preopen {
-            return 8;
-        }
-        (entry.is_preopen, entry.is_directory, entry.host_path.as_ref().map(|p| p.len()).unwrap_or(1))
+        (entry.is_preopen, entry.is_directory)
     };
+
+    // Only preopened directories should be returned
     if !is_preopen || !is_dir {
         return 8;
     }
 
+    // For our purposes, we want the "directory name" to be "."
+    let name_len: u32 = 1; // "." is 1 byte
+    // Build the prestat buffer:
+    //   offset 0: type (0 for directory)
+    //   offset 4: length of the directory name
     let mut buf = [0u8; 8];
     buf[0] = 0; // __WASI_PREOPENTYPE_DIR
-    let name_len = path_len as u32;
     buf[4..8].copy_from_slice(&name_len.to_le_bytes());
 
+    // Write the prestat struct back to memory.
     let offset = prestat_ptr as usize;
     let mut mem_mut = memory.data_mut(&mut caller);
     if offset + 8 > mem_mut.len() {
@@ -210,66 +212,41 @@ pub fn wasi_fd_prestat_get(
     0
 }
 
+
 pub fn wasi_fd_prestat_dir_name(
     mut caller: wasmtime::Caller<'_, ProcessData>,
     fd: i32,
     path_ptr: i32,
     path_len: i32,
 ) -> i32 {
-    use log::error; // If needed, or adjust as you wish
     use wasmtime::Extern;
-
-    // 1) Copy the directory path out of the FD table while locked, then drop the lock
-    let dir_str: String = {
-        let pd = caller.data();
-        let table = pd.fd_table.lock().unwrap();
-        if fd < 0 || fd as usize >= MAX_FDS {
-            return 8; // WASI_EBADF
-        }
-        let entry = match &table.entries[fd as usize] {
-            Some(e) => e,
-            None => return 8, // invalid FD
-        };
-        if !entry.is_preopen || !entry.is_directory {
-            return 8; // Not a preopened directory
-        }
-
-        // We clone into an owned String to avoid lifetime issues
-        match &entry.host_path {
-            Some(path) => path.clone(),
-            None => "/".to_string(),
-        }
-    };
-    // (Lock is dropped here, so we can do more with `caller`)
-
-    // 2) Now we can mutably borrow caller to get memory
+    use log::error;
     let memory = match caller.get_export("memory") {
         Some(Extern::Memory(mem)) => mem,
-        Some(Extern::SharedMemory(_)) => {
-            error!("fd_prestat_dir_name: SharedMemory not supported");
-            return 1;
-        },
-        Some(Extern::Func(_)) | Some(Extern::Global(_)) | Some(Extern::Table(_)) | None => {
+        _ => {
+            error!("fd_prestat_dir_name: Memory not found");
             return 1;
         }
     };
 
-    // 3) Copy the string into Wasm memory
+    // Return "." so that WASI libc uses FD=3 as the current working directory.
+    let dir_str = ".";
     let needed = dir_str.len();
     if (path_len as usize) < needed {
-        return 1; // Not enough space
+        return 1;
     }
 
     let mut mem_mut = memory.data_mut(&mut caller);
-
     let offset = path_ptr as usize;
     if offset + needed > mem_mut.len() {
-        return 1; // Out of bounds
+        return 1;
     }
 
-    mem_mut[offset..offset + needed].copy_from_slice(dir_str.as_bytes());
+    mem_mut[offset..offset+needed].copy_from_slice(dir_str.as_bytes());
     0
 }
+
+
 
 
 

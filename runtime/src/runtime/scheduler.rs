@@ -61,9 +61,6 @@ where
                 ProcessState::Finished => {
                     // Join the thread and discard the process.
                     let _ = proc.thread.join();
-                    if let Err(e) = remove_dir_all(&proc.data.root_path) {
-                        error!("Failed to remove dir for process {}: {}", proc.id, e);
-                    }
                     info!("Process {} finished and joined.", proc.id);
                 }
                 ProcessState::Ready => {
