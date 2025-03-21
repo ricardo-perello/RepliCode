@@ -176,17 +176,16 @@ pub fn start_process(
                     *s = ProcessState::Finished;
                 }
                 store.data().cond.notify_all();
-
-                debug!("Process {} _start returned; removing sandbox dir now", id);
-                // Remove the directory immediately on normal exit
-                let _ = fs::remove_dir_all(&store.data().root_path);
-                debug!("Process {} directory removed", id);
             }));
 
             if let Err(panic_payload) = result {
                 // On panic, also remove the directory
                 error!("Process {} panicked! Cleaning up sandbox directory...", id);
-                let _ = fs::remove_dir_all(&process_data_clone.root_path);
+                {
+                    // Update process state to Finished so the scheduler knows it's done.
+                    let mut st = process_data_clone.state.lock().unwrap();
+                    *st = ProcessState::Finished;
+                }
                 process_data_clone.cond.notify_all();
                 std::panic::resume_unwind(panic_payload);
             }
