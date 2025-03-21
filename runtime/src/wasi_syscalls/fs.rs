@@ -1,7 +1,7 @@
 use std::fs;
 use std::fs::OpenOptions;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use wasmtime::Caller;
 
 use crate::runtime::process::{ProcessData, ProcessState, BlockReason};
@@ -277,7 +277,7 @@ pub fn wasi_path_create_directory(
     let joined = root_path.join(path_str.trim_start_matches('/'));
     let canonical = match joined.canonicalize() {
         Ok(c) => c,
-        Err(e) => {
+        Err(_e) => {
             // If canonicalize fails because it doesn't exist yet, we might 
             // just use `joined.clone()`. For brevity, let's do:
             joined

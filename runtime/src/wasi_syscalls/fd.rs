@@ -1,7 +1,6 @@
 use wasmtime::{Caller, Extern};
 use std::io::{self, Write};
 use std::convert::TryInto;
-use crate::runtime::fd_table::MAX_FDS;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
 use crate::runtime::clock::GlobalClock;
 use log::{info, error};
@@ -204,7 +203,7 @@ pub fn wasi_fd_prestat_get(
 
     // Write the prestat struct back to memory.
     let offset = prestat_ptr as usize;
-    let mut mem_mut = memory.data_mut(&mut caller);
+    let mem_mut = memory.data_mut(&mut caller);
     if offset + 8 > mem_mut.len() {
         return 1;
     }
@@ -236,7 +235,7 @@ pub fn wasi_fd_prestat_dir_name(
         return 1;
     }
 
-    let mut mem_mut = memory.data_mut(&mut caller);
+    let mem_mut = memory.data_mut(&mut caller);
     let offset = path_ptr as usize;
     if offset + needed > mem_mut.len() {
         return 1;
