@@ -24,7 +24,7 @@ fn main() -> io::Result<()> {
     info!("Running in {} mode", mode);
 
     match mode {
-        // "benchmark" => modes::run_benchmark_mode(),
+        "benchmark" => modes::run_benchmark_mode(),
         // "hybrid" => {
         //     if args.len() < 3 {
         //         eprintln!("Hybrid mode requires an input file path as the second argument.");

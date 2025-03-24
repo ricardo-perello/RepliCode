@@ -1,5 +1,5 @@
-// use std::fs::{File, OpenOptions};
 use std::io::{self, Write}; //, Read, BufReader};
+use std::fs::OpenOptions;
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -11,38 +11,38 @@ use log::{debug, error, info};
 use crate::record::write_record;
 use crate::commands::{parse_command, Command};
 
-// pub fn run_benchmark_mode() -> io::Result<()> {
-//     let file_path = "consensus/consensus_input.bin";
-//     let mut output = OpenOptions::new()
-//         .create(true)
-//         .append(true)
-//         .open(file_path)?;
+pub fn run_benchmark_mode() -> io::Result<()> {
+    let file_path = "consensus/consensus_input.bin";
+    let mut output = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file_path)?;
 
-//     loop {
-//         eprint!("Command (init <file> | msg <pid> <message> | clock <nanoseconds> | net <src> <dst> <payload>): ");
-//         io::stderr().flush()?;
-//         let mut input = String::new();
-//         io::stdin().read_line(&mut input)?;
-//         let input = input.trim();
-//         if input.eq_ignore_ascii_case("exit") {
-//             break;
-//         }
-//         if let Some(cmd) = parse_command(input) {
-//             let record = write_record(&cmd)?;
-//             output.write_all(&record)?;
-//             output.flush()?;
-//             match &cmd {
-//                 Command::Init(_) => eprintln!("Initialization record written."),
-//                 Command::FDMsg(pid, _) => eprintln!("Message record for process {} written.", pid),
-//                 Command::Clock(delta) => eprintln!("Clock record ({} ns) written.", delta),
-//                 Command::NetMsg(net_msg) => eprintln!("Network message from {} to {} written.", net_msg.src, net_msg.dst),
-//             }
-//         }
-//     }
+    loop {
+        eprint!("Command (init <wasm_file> | msg <pid> <message> | ftp <pid> <ftp_command> | clock <nanoseconds>): ");
+        io::stderr().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+        if input.eq_ignore_ascii_case("exit") {
+            break;
+        }
+        if let Some(cmd) = parse_command(input) {
+            let record = write_record(&cmd)?;
+            output.write_all(&record)?;
+            output.flush()?;
+            match &cmd {
+                Command::Init(_) => info!("Initialization record written."),
+                Command::FDMsg(pid, _) => info!("Message record for process {} written.", pid),
+                Command::Clock(delta) => info!("Clock record ({} ns) written.", delta),
+                Command::Ftp(pid, cmd) => info!("FTP command for process {} written: {}", pid, cmd),
+            }
+        }
+    }
 
-//     eprintln!("Exiting Benchmark Mode.");
-//     Ok(())
-// }
+    info!("Benchmark mode: Exiting.");
+    Ok(())
+}
 
 // pub fn run_hybrid_mode(input_file_path: &str) -> io::Result<()> {
 //     let file = File::open(input_file_path)?;
