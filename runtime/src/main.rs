@@ -4,7 +4,7 @@ use env_logger;
 mod consensus_input;
 mod runtime;
 mod wasi_syscalls;
-use std::{net::TcpStream, path::Path};
+use std::net::TcpStream;
 
 fn main() -> Result<()> {
     // Initialize the logger (env_logger reads RUST_LOG env variable)

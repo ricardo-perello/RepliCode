@@ -6,6 +6,7 @@ use wasmtime::Caller;
 
 use crate::runtime::process::{ProcessData, ProcessState, BlockReason};
 use crate::runtime::fd_table::{FDEntry, MAX_FDS};
+use crate::wasi_syscalls::fd::wasi_proc_exit;
 
 fn io_err_to_wasi_errno(e: &io::Error) -> i32 {
     use io::ErrorKind::*;
@@ -94,7 +95,6 @@ fn kill_process(caller: &mut Caller<'_, ProcessData>) -> ! {
         *st = ProcessState::Finished;
     }
     let pd = caller.data();
-    let _ = fs::remove_dir_all(&pd.root_path);
     pd.cond.notify_all();
     panic!("Process forcibly killed due to disk quota exceeded");
 }
@@ -306,6 +306,34 @@ pub fn wasi_path_create_directory(
             io_err_to_wasi_errno(&e)
         }
     }
+}
+
+/// Implementation of the symbolic link syscall.
+/// Since symlink is not supported, we simply log an error,
+/// mark the process as Finished, notify the scheduler,
+/// and then loop indefinitely until the scheduler joins the thread.
+pub fn wasi_path_symlink(
+    caller: Caller<'_, ProcessData>,
+    _old_path_ptr: i32,
+    _old_path_len: i32,
+    _new_dirfd: i32,
+    _new_path_ptr: i32,
+    _new_path_len: i32,
+) -> i32 {
+    eprintln!("wasi_path_symlink: operation not supported");
+    
+    {
+        // Set the process state to Finished so the scheduler can later join this thread.
+        let mut state = caller.data().state.lock().unwrap();
+        *state = ProcessState::Finished;
+    }
+    // Notify any waiting threads that the process state has changed.
+    caller.data().cond.notify_all();
+
+    // Terminate the process.
+    wasi_proc_exit(caller, 1);
+    // This line is unreachable.
+    0
 }
 
 

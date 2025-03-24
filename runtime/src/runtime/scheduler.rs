@@ -104,6 +104,11 @@ where
                     ProcessState::Ready => ready_queue.push_back(proc),
                     ProcessState::Blocked => blocked_queue.push_back(proc),
                     ProcessState::Finished => {
+                        if let Err(e) = fs::remove_dir_all(&proc.data.root_path) {
+                            if e.kind() != std::io::ErrorKind::NotFound {
+                                error!("Failed to remove dir for process {}: {}", proc.id, e);
+                            }
+                        }
                         let _ = proc.thread.join();
                         info!("Process {} finished and joined.", proc.id);
                     }

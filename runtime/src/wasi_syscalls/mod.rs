@@ -23,6 +23,8 @@ pub fn register(linker: &mut Linker<ProcessData>) -> Result<()> {
     linker.func_wrap("wasi_snapshot_preview1", "path_create_directory", fs::wasi_path_create_directory)?;
     linker.func_wrap("wasi_snapshot_preview1", "path_remove_directory", fs::wasi_path_remove_directory)?;
     linker.func_wrap("wasi_snapshot_preview1", "path_unlink_file", fs::wasi_path_unlink_file)?;
+    linker.func_wrap("wasi_snapshot_preview1", "path_symlink", fs::wasi_path_symlink)?;
+
     
 
 
