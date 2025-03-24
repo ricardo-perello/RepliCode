@@ -17,17 +17,18 @@ use std::time::Duration;
 /// and updates their state based on external input.
 pub fn run_scheduler_dynamic<F>(processes: Vec<Process>, mut consensus_input: F) -> Result<()>
 where
-    F: FnMut(&mut Vec<Process>) -> Result<()>,
+    F: FnMut(&mut Vec<Process>) -> Result<bool>,
 {
     let mut ready_queue: VecDeque<Process> = processes.into();
     let mut blocked_queue: VecDeque<Process> = VecDeque::new();
+    let mut has_more_input = true;
 
     debug!(
         "Dynamic scheduler running on thread: {}",
         thread::current().name().unwrap_or("scheduler")
     );
 
-    loop {
+    while has_more_input || !ready_queue.is_empty() || !blocked_queue.is_empty() {
         // Process all ready processes.
         while let Some(proc) = ready_queue.pop_front() {
             {
@@ -83,16 +84,23 @@ where
             if blocked_queue.is_empty() {
                 debug!("No processes in queue; waiting for consensus input.");
                 let mut new_processes = Vec::new();
-                consensus_input(&mut new_processes)?;
+                has_more_input = consensus_input(&mut new_processes)?;
                 ready_queue.extend(new_processes);
-                if ready_queue.is_empty() {
+                
+                if ready_queue.is_empty() && !has_more_input {
+                    info!("All processes finished and no more consensus input. Exiting scheduler.");
+                    break;
+                }
+                
+                if ready_queue.is_empty() && has_more_input {
+                    // We have more input but no processes - sleep briefly
                     thread::sleep(Duration::from_millis(10));
                     continue;
                 }
             } else {
                 // Combine blocked processes and update their states.
                 let mut all_processes: Vec<Process> = blocked_queue.drain(..).collect();
-                consensus_input(&mut all_processes)?;
+                has_more_input = consensus_input(&mut all_processes)?;
                 info!("All processes blocked; consensus input updated process states.");
 
                 // Re-split processes based on new state.
@@ -147,6 +155,11 @@ where
                 }
                 blocked_queue = still_blocked;
 
+                if ready_queue.is_empty() && blocked_queue.is_empty() && !has_more_input {
+                    info!("All processes finished and no more consensus input. Exiting scheduler.");
+                    break;
+                }
+
                 if ready_queue.is_empty() {
                     debug!("No processes unblocked; scheduler sleeping briefly.");
                     thread::sleep(Duration::from_millis(10));
@@ -154,6 +167,9 @@ where
             }
         }
     }
+    
+    info!("Scheduler exiting: no more processes to run and no more input.");
+    Ok(())
 }
 
 
@@ -167,7 +183,9 @@ pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) ->
 // // /// Wrapper for interactive mode using a live consensus pipe/socket.
 pub fn run_scheduler_interactive<R: Read>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
     run_scheduler_dynamic(processes, |processes| {
-        process_consensus_pipe(consensus_pipe, processes)
+        // Process pipe should keep running indefinitely
+        process_consensus_pipe(consensus_pipe, processes)?;
+        Ok(true) // Always return true for pipe mode to keep scheduler running
     })
 }
 
