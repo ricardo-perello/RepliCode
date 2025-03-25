@@ -4,7 +4,6 @@ use env_logger;
 mod consensus_input;
 mod runtime;
 mod wasi_syscalls;
-mod new_main;
 use std::net::TcpStream;
 
 fn main() -> Result<()> {

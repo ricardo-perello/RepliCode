@@ -40,7 +40,7 @@ fn block_process_for_fileio(caller: &mut Caller<'_, ProcessData>) {
 // Disk-usage tracking support
 // ----------------------------------------------------------------------------
 
-/// Increment the process’s tracked usage by `bytes`. If the limit is exceeded,
+/// Increment the process's tracked usage by `bytes`. If the limit is exceeded,
 /// forcibly kill the process.
 fn usage_add(caller: &mut Caller<'_, ProcessData>, bytes: u64) -> Result<(), i32> {
     // 1) Figure out if we exceed the limit
@@ -65,7 +65,7 @@ fn usage_add(caller: &mut Caller<'_, ProcessData>, bytes: u64) -> Result<(), i32
 }
 
 
-/// Decrement the process’s tracked usage by `bytes`. 
+/// Decrement the process's tracked usage by `bytes`. 
 fn usage_sub(caller: &mut Caller<'_, ProcessData>, bytes: u64) {
     let pd = caller.data();
     let mut usage = pd.current_disk_usage.lock().unwrap();
@@ -137,6 +137,16 @@ pub fn wasi_path_unlink_file(
 
     let root_path = caller.data().root_path.clone();
     let joined = root_path.join(path_str.trim_start_matches('/'));
+    
+    // Canonicalize paths for security check
+    let canonical_root = match root_path.canonicalize() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("path_unlink_file: failed to canonicalize root path: {}", e);
+            return io_err_to_wasi_errno(&e);
+        }
+    };
+    
     let canonical = match joined.canonicalize() {
         Ok(c) => c,
         Err(e) => {
@@ -144,7 +154,8 @@ pub fn wasi_path_unlink_file(
             return 2;
         }
     };
-    if !canonical.starts_with(&root_path) {
+    
+    if !canonical.starts_with(&canonical_root) {
         error!("path_unlink_file: attempt to escape sandbox root!");
         return 13;
     }
@@ -206,6 +217,16 @@ pub fn wasi_path_remove_directory(
 
     let root_path = caller.data().root_path.clone();
     let joined = root_path.join(path_str.trim_start_matches('/'));
+    
+    // Canonicalize paths for security check
+    let canonical_root = match root_path.canonicalize() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("path_remove_directory: failed to canonicalize root path: {}", e);
+            return io_err_to_wasi_errno(&e);
+        }
+    };
+    
     let canonical = match joined.canonicalize() {
         Ok(c) => c,
         Err(e) => {
@@ -213,7 +234,8 @@ pub fn wasi_path_remove_directory(
             return 2;
         }
     };
-    if !canonical.starts_with(&root_path) {
+    
+    if !canonical.starts_with(&canonical_root) {
         error!("path_remove_directory: attempt to escape sandbox root!");
         return 13;
     }
@@ -274,25 +296,54 @@ pub fn wasi_path_create_directory(
     };
 
     let root_path = caller.data().root_path.clone();
+    
+    // Join the requested path to the root path
     let joined = root_path.join(path_str.trim_start_matches('/'));
-    let canonical = match joined.canonicalize() {
-        Ok(c) => c,
-        Err(_e) => {
-            // If canonicalize fails because it doesn't exist yet, we might 
-            // just use `joined.clone()`. For brevity, let's do:
-            joined
+    
+    // For security check, we need to canonicalize existing paths or ensure joined path is valid
+    // First, check if the parent of joined exists and can be canonicalized
+    let parent_path = joined.parent().unwrap_or(&joined);
+    if parent_path.exists() {
+        let canonical_parent = match parent_path.canonicalize() {
+            Ok(c) => c,
+            Err(e) => {
+                error!("path_create_directory: failed to canonicalize parent path: {}", e);
+                return io_err_to_wasi_errno(&e);
+            }
+        };
+        
+        // Canonicalize the root path
+        let canonical_root = match root_path.canonicalize() {
+            Ok(c) => c,
+            Err(e) => {
+                error!("path_create_directory: failed to canonicalize root path: {}", e);
+                return io_err_to_wasi_errno(&e);
+            }
+        };
+        
+        // Check if the parent is within the sandbox
+        if !canonical_parent.starts_with(&canonical_root) {
+            error!("path_create_directory: attempt to escape sandbox root. parent path: {:?}, canonical root: {:?}", canonical_parent, canonical_root);
+            return 13;
         }
-    };
-    if !canonical.starts_with(&root_path) {
-        error!("path_create_directory: attempt to escape sandbox root!");
-        return 13;
+    } else {
+        // If parent doesn't exist, we can just do a simple string-based check
+        // Convert both to string and check if joined starts with root_path
+        let root_str = root_path.to_string_lossy().to_string();
+        let joined_str = joined.to_string_lossy().to_string();
+        
+        if !joined_str.starts_with(&root_str) {
+            error!("path_create_directory: attempt to escape sandbox root with non-existent path");
+            return 13;
+        }
     }
 
-    match fs::create_dir(&canonical) {
+    // At this point, we've determined the path is safe to create
+    match fs::create_dir(&joined) {
         Ok(_) => {
             // For a directory, you can count a small overhead. 
-            // Or do metadata().len(). Let’s do that:
-            let dir_metadata_size = match fs::metadata(&canonical) {
+            // Or do metadata().len(). Let's do that:
+            let dir_metadata_size = match fs::metadata(&joined) {
                 Ok(md) => md.len(),
                 Err(_) => 4096, // fallback
             };
@@ -400,13 +451,62 @@ pub fn wasi_path_open(
 
     // 3) Join relative path to fake root.
     let joined_path = root_path.join(path_str.trim_start_matches('/'));
-    let canonical = match joined_path.canonicalize() {
+    
+    // 4) Security check: ensure the path is inside the fake root.
+    // Canonicalize the root path
+    let canonical_root = match root_path.canonicalize() {
         Ok(c) => c,
-        Err(_) => joined_path.clone(),  // if it doesn't exist, use joined_path
+        Err(e) => {
+            eprintln!("path_open: failed to canonicalize root path: {}", e);
+            return io_err_to_wasi_errno(&e);
+        }
     };
-
-    // 4) Ensure the path is inside the fake root.
-    if !canonical.starts_with(&root_path) {
+    
+    // If the path exists, canonicalize it for comparison
+    let canonical = if joined_path.exists() {
+        match joined_path.canonicalize() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("path_open: canonicalize error: {}", e);
+                return io_err_to_wasi_errno(&e);
+            }
+        }
+    } else {
+        // If the path doesn't exist, check its parent
+        let parent = joined_path.parent().unwrap_or(&joined_path);
+        if parent.exists() {
+            let parent_canonical = match parent.canonicalize() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("path_open: failed to canonicalize parent: {}", e);
+                    return io_err_to_wasi_errno(&e);
+                }
+            };
+            
+            // Check if parent is inside sandbox
+            if !parent_canonical.starts_with(&canonical_root) {
+                eprintln!("path_open: attempt to escape sandbox root!");
+                return 13;
+            }
+            
+            // Use the joined path for further operations
+            joined_path.clone()
+        } else {
+            // If even parent doesn't exist, do simple string check
+            let root_str = root_path.to_string_lossy().to_string();
+            let joined_str = joined_path.to_string_lossy().to_string();
+            
+            if !joined_str.starts_with(&root_str) {
+                eprintln!("path_open: attempt to escape sandbox root with non-existent path");
+                return 13;
+            }
+            
+            joined_path.clone()
+        }
+    };
+    
+    // If we have a canonicalized path, check it
+    if canonical.exists() && !canonical.starts_with(&canonical_root) {
         eprintln!("path_open: attempt to escape sandbox root!");
         return 13;
     }

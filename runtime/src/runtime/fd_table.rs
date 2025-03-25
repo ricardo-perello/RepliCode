@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 
 use log::debug;
 
@@ -32,7 +33,7 @@ pub struct FDTable {
 }
 
 impl FDTable {
-    pub fn new() -> Self {
+    pub fn new(process_root: PathBuf) -> Self {
         let mut table = FDTable {
             entries: Default::default(),
         };
@@ -41,16 +42,31 @@ impl FDTable {
         table.entries[0] = Some(FDEntry {  // stdin
             buffer: Vec::new(),
             read_ptr: 0,
+            is_directory: false,
+            is_preopen: false,
+            host_path: None,
         });
         table.entries[1] = Some(FDEntry {  // stdout
             buffer: Vec::new(),
             read_ptr: 0,
+            is_directory: false,
+            is_preopen: false,
+            host_path: None,
         });
         table.entries[2] = Some(FDEntry {  // stderr
             buffer: Vec::new(),
             read_ptr: 0,
+            is_directory: false,
+            is_preopen: false,
+            host_path: None,
         });
-        
+        table.entries[3] = Some(FDEntry {
+            buffer: Vec::new(),
+            read_ptr: 0,
+            is_directory: true,
+            is_preopen: true,
+            host_path: Some(process_root.to_string_lossy().into_owned()),
+        });
         table
     }
 

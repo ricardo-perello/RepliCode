@@ -6,7 +6,7 @@ use std::{
 use wasmtime::{Engine, Module, Store, Linker};
 
 use crate::{
-    runtime::fd_table::FDTable,
+    runtime::fd_table::{FDTable, FDEntry},
     wasi_syscalls,
 };
 
@@ -76,8 +76,8 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
     let state = Arc::new(Mutex::new(ProcessState::Ready));
     let cond = Arc::new(Condvar::new());
     let block_reason = Arc::new(Mutex::new(None));
-    let fd_table = Arc::new(Mutex::new(FDTable::new()));
-    let process_root = PathBuf::from(format!("/tmp/wasm_sandbox/pid_{}", id));
+    let process_root = PathBuf::from("wasi_sandbox").join(format!("pid_{}", id));
+    let fd_table = Arc::new(Mutex::new(FDTable::new(process_root.clone())));
     fs::create_dir_all(&process_root)?;
 
     let process_data = ProcessData {
@@ -86,6 +86,8 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
         block_reason,
         fd_table,
         root_path: process_root,
+        max_disk_usage: 1024 * 1024 * 10, // 10MB default limit
+        current_disk_usage: Arc::new(Mutex::new(0)),
     };
 
     let thread_data = process_data.clone();
@@ -142,6 +144,7 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
     info!("Started process with id {}", id);
     Ok(Process { id, thread, data: process_data })
 }
+
 /// Spawns a new process from a WASM module and assigns it a unique ID.
 /// Now also optionally copies a preload directory (`preload_dir`) into the
 /// new process sandbox before execution starts.
@@ -158,11 +161,19 @@ pub fn start_process(
     let module = Module::from_file(&engine, &wasm_path)?;
     debug!("WASM module loaded from path: {:?}", wasm_path);
 
+    // Create the sandbox directory in "wasi_sandbox/pid_<ID>"
+    let sandbox_base = PathBuf::from("wasi_sandbox");
+    create_dir_all(&sandbox_base)?;
+    let process_root_rel = sandbox_base.join(format!("pid_{}", id));
+    create_dir_all(&process_root_rel)?;
+    let process_root = fs::canonicalize(&process_root_rel)?;
+    info!("Created sandbox for process {} at: {}", id, process_root.display());
+
     // Initialize process state and FD table
     let state = Arc::new(Mutex::new(ProcessState::Ready));
     let cond = Arc::new(Condvar::new());
     let reason = Arc::new(Mutex::new(None));
-    let fd_table = Arc::new(Mutex::new(FDTable::new()));
+    let fd_table = Arc::new(Mutex::new(FDTable::new(process_root.clone())));
     {
         let mut table = fd_table.lock().unwrap();
         // Reserve FD=0 for stdin
@@ -174,14 +185,6 @@ pub fn start_process(
             host_path: None,
         });
     }
-
-    // Create the sandbox directory in "runtime/tmp/pid_<ID>"
-    let sandbox_base = PathBuf::from("runtime").join("tmp");
-    create_dir_all(&sandbox_base)?;
-    let process_root_rel = sandbox_base.join(format!("pid_{}", id));
-    create_dir_all(&process_root_rel)?;
-    let process_root = fs::canonicalize(&process_root_rel)?;
-    info!("Created sandbox for process {} at: {}", id, process_root.display());
 
     // Optionally preload a directory
     if let Some(src_dir) = preload_dir {
@@ -275,7 +278,6 @@ pub fn start_process(
     info!("Started process with id {}", id);
     Ok(Process { id, thread, data: process_data })
 }
-
 
 /// Recursively copy all files & subdirectories from `src` into `dst`.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
