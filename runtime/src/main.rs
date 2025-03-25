@@ -4,6 +4,7 @@ use env_logger;
 mod consensus_input;
 mod runtime;
 mod wasi_syscalls;
+mod new_main;
 use std::net::TcpStream;
 
 fn main() -> Result<()> {
@@ -17,30 +18,9 @@ fn main() -> Result<()> {
     debug!("Arguments: {:?}", args);
 
     // Spawn processes from WASM modules.
-    let mut processes = Vec::new();
-    let mut wasm_files = Vec::new();
-    let wasm_folder = "wasm_programs/build";
-    let mut next_id = 1;
-    for entry in std::fs::read_dir(wasm_folder)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("wasm") {
-            info!("Runtime: Found WASM: {:?}", path);
-            wasm_files.push(path);
-        }
-            
-    }
-    debug!("WASM files to process: {:?}", wasm_files);
-    
-    for path in wasm_files{
-        //let testdir_path = Path::new("runtime/testdir"); // relative path "testdir"
-        //let preload_dir = Some(testdir_path);
-        let process = runtime::process::start_process(path, next_id, None, 1000000000)?; //TODO change max disk size to reasonable value
-        info!("Runtime: Started process with pid {}", next_id);
-        next_id += 1;
-        processes.push(process);
-    }
-
+    let processes = Vec::new();
+    //let testdir_path = Path::new("runtime/testdir"); // relative path "testdir"
+    //let preload_dir = Some(testdir_path);
     match mode {
         "benchmark" => {
             let consensus_file = "consensus/consensus_input.bin";
