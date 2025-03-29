@@ -360,68 +360,6 @@ pub fn wasi_poll_oneoff(
     0
 }
 
-/// Implementation for fd_write: writes to stdout/stderr.
-pub fn wasi_fd_write(
-    mut caller: Caller<'_, ProcessData>,
-    fd: i32,
-    iovs: i32,
-    iovs_len: i32,
-    nwritten: i32,
-) -> i32 {
-    let memory = match caller.get_export("memory") {
-        Some(Extern::Memory(mem)) => mem,
-        _ => {
-            error!("fd_write: Failed to find memory export");
-            return 1;
-        }
-    };
-
-    // First, use an immutable borrow to read the iovec information.
-    let total_written = {
-        let data = memory.data(&caller);
-        let mut total_written = 0;
-        for i in 0..iovs_len {
-            let iovec_addr = (iovs as usize) + (i as usize) * 8;
-            if iovec_addr + 8 > data.len() {
-                error!("iovec out of bounds");
-                return 1;
-            }
-            let offset_bytes: [u8; 4] = data[iovec_addr..iovec_addr + 4].try_into().unwrap();
-            let len_bytes: [u8; 4] = data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
-            let offset = u32::from_le_bytes(offset_bytes) as usize;
-            let len = u32::from_le_bytes(len_bytes) as usize;
-            if offset + len > data.len() {
-                error!("data slice out of bounds");
-                return 1;
-            }
-            let slice = &data[offset..offset + len];
-            match fd {
-                1 => { io::stdout().write_all(slice).unwrap(); },
-                2 => { io::stderr().write_all(slice).unwrap(); },
-                _ => {
-                    error!("fd_write called with unsupported fd: {}", fd);
-                    return 1;
-                }
-            }
-            total_written += len;
-        }
-        total_written
-    };
-
-    // Then use a mutable borrow to write the nwritten value back into memory.
-    {
-        let total_written_bytes = (total_written as u32).to_le_bytes();
-        let nwritten_ptr = nwritten as usize;
-        let mem_mut = memory.data_mut(&mut caller);
-        if nwritten_ptr + 4 > mem_mut.len() {
-            error!("nwritten pointer out of bounds");
-            return 1;
-        }
-        mem_mut[nwritten_ptr..nwritten_ptr + 4].copy_from_slice(&total_written_bytes);
-    }
-    0
-}
-
 /// Implementation for proc_exit: logs and terminates the process.
 pub fn wasi_proc_exit(_caller: Caller<'_, ProcessData>, code: i32) {
     info!("Called proc_exit with code: {}", code);

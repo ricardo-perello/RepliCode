@@ -2,7 +2,9 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
-use wasmtime::Caller;
+use log::error;
+use wasmtime::{Caller, Extern};
+use std::io::Write;
 
 use crate::runtime::process::{ProcessData, ProcessState, BlockReason};
 use crate::runtime::fd_table::{FDEntry, MAX_FDS};
@@ -696,6 +698,231 @@ pub fn wasi_fd_readdir(
     // 5) Write how many bytes we used into bufused_out
     set_bufused(&mut caller, bufused_out, n_to_copy as u32)
 }
+
+
+pub fn wasi_fd_write(
+    mut caller: Caller<'_, ProcessData>,
+    fd: i32,
+    iovs: i32,
+    iovs_len: i32,
+    nwritten: i32,
+) -> i32 {
+    let memory = match caller.get_export("memory") {
+        Some(Extern::Memory(mem)) => mem,
+        _ => {
+            error!("fd_write: Failed to find memory export");
+            return 1;
+        }
+    };
+
+    // Gather all data from the iovec list.
+    let data_to_write = {
+        let data = memory.data(&caller);
+        let mut buf = Vec::new();
+        for i in 0..iovs_len {
+            let iovec_addr = (iovs as usize) + (i as usize) * 8;
+            if iovec_addr + 8 > data.len() {
+                error!("fd_write: iovec out of bounds");
+                return 1;
+            }
+            let offset_bytes: [u8; 4] =
+                data[iovec_addr..iovec_addr + 4].try_into().unwrap();
+            let len_bytes: [u8; 4] =
+                data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
+            let offset = u32::from_le_bytes(offset_bytes) as usize;
+            let len = u32::from_le_bytes(len_bytes) as usize;
+            if offset + len > data.len() {
+                error!("fd_write: data slice out of bounds");
+                return 1;
+            }
+            buf.extend_from_slice(&data[offset..offset + len]);
+        }
+        buf
+    };
+
+    let total_written = if fd == 1 {
+        // Write to stdout, converting io::Error into i32
+        io::stdout()
+            .write_all(&data_to_write)
+            .map(|_| data_to_write.len())
+            .map_err(|e| io_err_to_wasi_errno(&e))
+    } else if fd == 2 {
+        // Write to stderr, converting io::Error into i32
+        io::stderr()
+            .write_all(&data_to_write)
+            .map(|_| data_to_write.len())
+            .map_err(|e| io_err_to_wasi_errno(&e))
+    } else {
+        // For sandbox file writes: retrieve the FDEntry's host_path.
+        let host_path_opt = {
+            let pd = caller.data();
+            let table = pd.fd_table.lock().unwrap();
+            match table.entries.get(fd as usize) {
+                Some(Some(entry)) if entry.host_path.is_some() && !entry.is_directory => {
+                    entry.host_path.clone()
+                }
+                _ => None,
+            }
+        };
+
+        if let Some(host_path) = host_path_opt {
+            // Update disk usage with the number of bytes to be written.
+            if let Err(errno) = usage_add(&mut caller, data_to_write.len() as u64) {
+                return errno;
+            }
+            // Open the file in append mode.
+            match OpenOptions::new().append(true).open(&host_path) {
+                Ok(mut file) => {
+                    match file.write_all(&data_to_write) {
+                        Ok(_) => {
+                            // Optionally update the in-memory FDEntry buffer.
+                            let mut table = caller.data().fd_table.lock().unwrap();
+                            if let Some(Some(entry)) = table.entries.get_mut(fd as usize) {
+                                entry.buffer.extend_from_slice(&data_to_write);
+                            }
+                            Ok(data_to_write.len())
+                        }
+                        Err(e) => {
+                            error!("fd_write: failed to write to file {}: {}", host_path, e);
+                            Err(io_err_to_wasi_errno(&e))
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("fd_write: failed to open file {}: {}", host_path, e);
+                    Err(io_err_to_wasi_errno(&e))
+                }
+            }
+        } else {
+            error!("fd_write: unsupported fd: {}", fd);
+            Err(1)
+        }
+    };
+
+    let bytes_written = match total_written {
+        Ok(n) => n,
+        Err(errno) => return errno,
+    };
+
+    // Write the number of bytes written back into WASM memory.
+    {
+        let total_written_bytes = (bytes_written as u32).to_le_bytes();
+        let nwritten_ptr = nwritten as usize;
+        let mem_mut = memory.data_mut(&mut caller);
+        if nwritten_ptr + 4 > mem_mut.len() {
+            error!("fd_write: nwritten pointer out of bounds");
+            return 1;
+        }
+        mem_mut[nwritten_ptr..nwritten_ptr + 4].copy_from_slice(&total_written_bytes);
+    }
+    0
+}
+
+
+pub fn wasi_file_create(
+    mut caller: Caller<'_, ProcessData>,
+    path_ptr: i32,
+    path_len: i32,
+    opened_fd_out: i32,
+) -> i32 {
+    let memory = match caller.get_export("memory") {
+        Some(Extern::Memory(mem)) => mem,
+        _ => {
+            error!("file_create: No memory export found");
+            return 1;
+        }
+    };
+
+    let mem_data = memory.data(&caller);
+    let start = path_ptr as usize;
+    let end = start + (path_len as usize);
+    if end > mem_data.len() {
+        error!("file_create: path out of bounds");
+        return 1;
+    }
+    let path_str = match std::str::from_utf8(&mem_data[start..end]) {
+        Ok(s) => s,
+        Err(_) => {
+            error!("file_create: invalid UTF-8");
+            return 1;
+        }
+    };
+
+    // Build the full path inside the sandbox.
+    let root_path = caller.data().root_path.clone();
+    let joined_path = root_path.join(path_str.trim_start_matches('/'));
+
+    // Security check: ensure the parent directory is inside the sandbox.
+    let parent = joined_path.parent().unwrap_or(&joined_path);
+    let canonical_parent = match parent.canonicalize() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("file_create: failed to canonicalize parent: {}", e);
+            return io_err_to_wasi_errno(&e);
+        }
+    };
+    let canonical_root = match root_path.canonicalize() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("file_create: failed to canonicalize root: {}", e);
+            return io_err_to_wasi_errno(&e);
+        }
+    };
+    if !canonical_parent.starts_with(&canonical_root) {
+        error!("file_create: attempt to escape sandbox root");
+        return 13;
+    }
+
+    // Create the new file; use create_new(true) to fail if the file exists.
+    match OpenOptions::new().write(true).create_new(true).open(&joined_path) {
+        Ok(_file) => {
+            // Retrieve metadata size (or use a fallback overhead, e.g. 4096 bytes).
+            let metadata_size = match fs::metadata(&joined_path) {
+                Ok(md) => md.len(),
+                Err(_) => 4096,
+            };
+            // Update disk usage with the metadata overhead.
+            if let Err(errno) = usage_add(&mut caller, metadata_size) {
+                return errno;
+            }
+            // Allocate a new FD.
+            let fd = {
+                let pd = caller.data();
+                let mut table = pd.fd_table.lock().unwrap();
+                let fd = table.allocate_fd();
+                if fd < 0 {
+                    error!("file_create: No free FD available!");
+                    return 76;
+                }
+                table.entries[fd as usize] = Some(FDEntry {
+                    buffer: Vec::new(),
+                    read_ptr: 0,
+                    is_directory: false,
+                    is_preopen: false,
+                    host_path: Some(joined_path.to_string_lossy().into_owned()),
+                });
+                fd
+            };
+
+            // Write the new FD back into WASM memory.
+            {
+                let mem_mut = memory.data_mut(&mut caller);
+                let out_ptr = opened_fd_out as usize;
+                if out_ptr + 4 > mem_mut.len() {
+                    error!("file_create: opened_fd_out pointer out of bounds");
+                    return 1;
+                }
+                mem_mut[out_ptr..out_ptr + 4].copy_from_slice(&(fd as u32).to_le_bytes());
+            }
+            0
+        }
+        Err(e) => {
+            error!("file_create: Failed to create file: {}", e);
+            io_err_to_wasi_errno(&e)
+        }
+    }
+}
+
 
 /// Utility to write the "bytes used" result into memory
 fn set_bufused(caller: &mut Caller<'_, ProcessData>, ptr: i32, value: u32) -> i32 {
