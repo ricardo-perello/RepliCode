@@ -90,7 +90,7 @@ fn get_dir_size(path: &Path) -> io::Result<u64> {
     Ok(size)
 }
 
-/// Kill the current process: mark it Finished, remove its directory, and panic.
+/// Kill the current process: mark it Finished, remove its directory.
 fn kill_process(caller: &mut Caller<'_, ProcessData>) -> ! {
     {
         let mut st = caller.data().state.lock().unwrap();
@@ -98,7 +98,7 @@ fn kill_process(caller: &mut Caller<'_, ProcessData>) -> ! {
     }
     let pd = caller.data();
     pd.cond.notify_all();
-    panic!("Process forcibly killed due to disk quota exceeded");
+    wasi_proc_exit(caller, 1);
 }
 
 // ----------------------------------------------------------------------------
@@ -366,7 +366,7 @@ pub fn wasi_path_create_directory(
 /// mark the process as Finished, notify the scheduler,
 /// and then loop indefinitely until the scheduler joins the thread.
 pub fn wasi_path_symlink(
-    caller: Caller<'_, ProcessData>,
+    mut caller: Caller<'_, ProcessData>,
     _old_path_ptr: i32,
     _old_path_len: i32,
     _new_dirfd: i32,
@@ -375,18 +375,7 @@ pub fn wasi_path_symlink(
 ) -> i32 {
     eprintln!("wasi_path_symlink: operation not supported");
     
-    {
-        // Set the process state to Finished so the scheduler can later join this thread.
-        let mut state = caller.data().state.lock().unwrap();
-        *state = ProcessState::Finished;
-    }
-    // Notify any waiting threads that the process state has changed.
-    caller.data().cond.notify_all();
-
-    // Terminate the process.
-    wasi_proc_exit(caller, 1);
-    // This line is unreachable.
-    0
+    kill_process(&mut caller);
 }
 
 
