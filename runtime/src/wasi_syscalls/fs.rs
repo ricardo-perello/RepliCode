@@ -8,7 +8,6 @@ use std::io::Write;
 
 use crate::runtime::process::{ProcessData, ProcessState, BlockReason};
 use crate::runtime::fd_table::{FDEntry, MAX_FDS};
-use crate::wasi_syscalls::fd::wasi_proc_exit;
 
 fn io_err_to_wasi_errno(e: &io::Error) -> i32 {
     use io::ErrorKind::*;
@@ -91,14 +90,15 @@ fn get_dir_size(path: &Path) -> io::Result<u64> {
 }
 
 /// Kill the current process: mark it Finished, remove its directory.
-fn kill_process(caller: &mut Caller<'_, ProcessData>) -> ! {
+fn kill_process(caller: &mut Caller<'_, ProcessData>) -> () {
     {
         let mut st = caller.data().state.lock().unwrap();
         *st = ProcessState::Finished;
     }
     let pd = caller.data();
     pd.cond.notify_all();
-    wasi_proc_exit(caller, 1);
+    // Just exit with status code 1
+    std::process::exit(1);
 }
 
 // ----------------------------------------------------------------------------
@@ -107,7 +107,7 @@ fn kill_process(caller: &mut Caller<'_, ProcessData>) -> ! {
 
 pub fn wasi_path_unlink_file(
     mut caller: wasmtime::Caller<'_, ProcessData>,
-    dirfd: i32,
+    _dirfd: i32,
     path_ptr: i32,
     path_len: i32,
 ) -> i32 {
@@ -187,7 +187,7 @@ pub fn wasi_path_unlink_file(
 
 pub fn wasi_path_remove_directory(
     mut caller: wasmtime::Caller<'_, ProcessData>,
-    dirfd: i32,
+    _dirfd: i32,
     path_ptr: i32,
     path_len: i32,
 ) -> i32 {
@@ -267,7 +267,7 @@ pub fn wasi_path_remove_directory(
 
 pub fn wasi_path_create_directory(
     mut caller: wasmtime::Caller<'_, ProcessData>,
-    dirfd: i32,
+    _dirfd: i32,
     path_ptr: i32,
     path_len: i32,
 ) -> i32 {
@@ -373,9 +373,9 @@ pub fn wasi_path_symlink(
     _new_path_ptr: i32,
     _new_path_len: i32,
 ) -> i32 {
-    eprintln!("wasi_path_symlink: operation not supported");
-    
+    error!("path_symlink: not yet implemented");
     kill_process(&mut caller);
+    1
 }
 
 

@@ -1,5 +1,5 @@
 use wasmtime::{Caller, Extern};
-use std::io::{self, Write};
+use std::io;
 use std::convert::TryInto;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
 use crate::runtime::clock::GlobalClock;
@@ -149,7 +149,7 @@ fn block_process_for_stdin(caller: &mut Caller<'_, ProcessData>) {
         }
         let mut reason = caller.data().block_reason.lock().unwrap();
         *reason = Some(BlockReason::StdinRead);
-        // Notify the scheduler that we’re now waiting.
+        // Notify the scheduler that we're now waiting.
         caller.data().cond.notify_all();
     }
 
@@ -214,7 +214,7 @@ pub fn wasi_fd_prestat_get(
 
 pub fn wasi_fd_prestat_dir_name(
     mut caller: wasmtime::Caller<'_, ProcessData>,
-    fd: i32,
+    _fd: i32,
     path_ptr: i32,
     path_len: i32,
 ) -> i32 {
@@ -361,7 +361,7 @@ pub fn wasi_poll_oneoff(
 }
 
 /// Implementation for proc_exit: logs and terminates the process.
-pub fn wasi_proc_exit(_caller: &mut Caller<'_, ProcessData>, code: i32) -> ! {
+pub fn wasi_proc_exit(_caller: Caller<'_, ProcessData>, code: i32) -> () {
     info!("Called proc_exit with code: {}", code);
     std::process::exit(code);
 }
