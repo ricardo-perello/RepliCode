@@ -68,6 +68,21 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
     config.consume_fuel(true);
     let engine = Engine::new(&config)?;
     debug!("WASM engine created");
+
+    // Check if the payload contains a directory path
+    let (wasm_bytes, preload_dir) = if let Some(dir_start) = wasm_bytes.iter().position(|&b| b == 0) {
+        let dir_str = String::from_utf8_lossy(&wasm_bytes[..dir_start]);
+        if dir_str.starts_with("dir:") {
+            let dir_path = &dir_str[4..];
+            let wasm_data = wasm_bytes[dir_start + 1..].to_vec();
+            (wasm_data, Some(PathBuf::from(dir_path)))
+        } else {
+            (wasm_bytes, None)
+        }
+    } else {
+        (wasm_bytes, None)
+    };
+
     // Load the module from the in-memory bytes.
     let module = Module::new(&engine, &wasm_bytes)?;
     debug!("WASM module loaded from bytes");
@@ -79,6 +94,16 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
     let process_root = PathBuf::from("wasi_sandbox").join(format!("pid_{}", id));
     let fd_table = Arc::new(Mutex::new(FDTable::new(process_root.clone())));
     fs::create_dir_all(&process_root)?;
+
+    // Optionally preload a directory
+    if let Some(src_dir) = &preload_dir {
+        if src_dir.exists() {
+            copy_dir_recursive(src_dir, &process_root)?;
+            info!("Preloaded {:?} into sandbox for process {}", src_dir, id);
+        } else {
+            error!("Preload directory {:?} does not exist", src_dir);
+        }
+    }
 
     let process_data = ProcessData {
         state: state.clone(),
@@ -187,9 +212,13 @@ pub fn start_process(
     }
 
     // Optionally preload a directory
-    if let Some(src_dir) = preload_dir {
-        copy_dir_recursive(src_dir, &process_root)?;
-        info!("Preloaded {:?} into sandbox for process {}", src_dir, id);
+    if let Some(src_dir) = &preload_dir {
+        if src_dir.exists() {
+            copy_dir_recursive(src_dir, &process_root)?;
+            info!("Preloaded {:?} into sandbox for process {}", src_dir, id);
+        } else {
+            error!("Preload directory {:?} does not exist", src_dir);
+        }
     }
 
     // Preopen FD=3 => the root directory

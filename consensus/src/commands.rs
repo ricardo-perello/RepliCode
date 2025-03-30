@@ -5,7 +5,7 @@ use log::error;
 #[derive(Clone, Debug)]
 pub enum Command {
     Clock(u64),
-    Init(Vec<u8>),
+    Init(Vec<u8>, Option<String>),
     FDMsg(u64, Vec<u8>),
     Ftp(u64, String), // New variant: includes a PID and FTP command string.
 }
@@ -19,7 +19,7 @@ pub fn read_wasm_file(file_path: &str) -> Vec<u8> {
 }
 /// Parse a text command into a high-level Command.
 /// Supported commands:
-///   - init <wasm_file>
+///   - init <wasm_file> [directory]
 ///   - msg <pid> <message>
 ///   - ftp <pid> <ftp_command>
 ///   - clock <nanoseconds>
@@ -34,7 +34,7 @@ pub fn parse_command(line: &str) -> Option<Command> {
     }
     match tokens[0].to_lowercase().as_str() {
         "init" => {
-            // "init <wasm_file>"
+            // "init <wasm_file> [directory]"
             let file_path = if tokens.len() >= 2 {
                 tokens[1].to_string()
             } else {
@@ -45,7 +45,12 @@ pub fn parse_command(line: &str) -> Option<Command> {
                 input.trim().to_string()
             };
             let wasm_bytes = read_wasm_file(&file_path);
-            Some(Command::Init(wasm_bytes))
+            let dir_path = if tokens.len() >= 3 {
+                Some(tokens[2].to_string())
+            } else {
+                None
+            };
+            Some(Command::Init(wasm_bytes, dir_path))
         },
         "msg" => {
             // "msg <pid> <message>"
