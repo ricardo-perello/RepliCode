@@ -98,7 +98,7 @@ fn kill_process(caller: &mut Caller<'_, ProcessData>) -> () {
     let pd = caller.data();
     pd.cond.notify_all();
     // Just exit with status code 1
-    std::process::exit(1);
+    std::process::exit(1); //TODO use wasi exit
 }
 
 // ----------------------------------------------------------------------------
