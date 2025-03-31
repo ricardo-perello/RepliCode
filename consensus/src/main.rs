@@ -1,7 +1,6 @@
 mod commands;
 mod record;
 mod modes;
-mod nat;
 
 use std::env;
 use std::io;
