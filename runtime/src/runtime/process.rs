@@ -29,6 +29,7 @@ pub enum BlockReason {
     StdinRead,
     Timeout { resume_after: u64 },
     FileIO,
+    WriteIO(String),
     NetworkIO,
 }
 
@@ -39,6 +40,7 @@ impl fmt::Display for BlockReason {
             BlockReason::Timeout { resume_after } => write!(f, "Timeout until {:?}", resume_after),
             BlockReason::FileIO => write!(f, "FileIO"),
             BlockReason::NetworkIO => write!(f, "NetworkIO"),
+            BlockReason::WriteIO(_) => write!(f, "WriteIO"),
         }
     }
 }
@@ -53,6 +55,8 @@ pub struct ProcessData {
     pub root_path: PathBuf,
     pub max_disk_usage: u64,
     pub current_disk_usage: Arc<Mutex<u64>>,
+    pub write_buffer: Arc<Mutex<Vec<u8>>>,
+    pub max_write_buffer: usize,
 }
 
 pub struct Process {
@@ -113,6 +117,8 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
         root_path: process_root,
         max_disk_usage: 1024 * 1024 * 10, // 10MB default limit
         current_disk_usage: Arc::new(Mutex::new(0)),
+        write_buffer: Arc::new(Mutex::new(Vec::new())),
+        max_write_buffer: 1024,
     };
 
     let thread_data = process_data.clone();
@@ -241,6 +247,8 @@ pub fn start_process(
         root_path: process_root.clone(),
         max_disk_usage: max_disk_bytes,
         current_disk_usage: Arc::new(Mutex::new(0)),
+        write_buffer: Arc::new(Mutex::new(Vec::new())),
+        max_write_buffer: 1024,
     };
 
     let process_data_clone = process_data.clone();

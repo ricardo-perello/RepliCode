@@ -690,21 +690,25 @@ pub fn wasi_fd_readdir(
 
 
 pub fn wasi_fd_write(
-    mut caller: Caller<'_, ProcessData>,
+    mut caller: wasmtime::Caller<'_, ProcessData>,
     fd: i32,
     iovs: i32,
     iovs_len: i32,
     nwritten: i32,
 ) -> i32 {
+    use std::cmp::min;
+    use std::convert::TryInto;
+    use std::io::Write;
+    
     let memory = match caller.get_export("memory") {
-        Some(Extern::Memory(mem)) => mem,
+        Some(wasmtime::Extern::Memory(mem)) => mem,
         _ => {
             error!("fd_write: Failed to find memory export");
             return 1;
         }
     };
-
-    // Gather all data from the iovec list.
+    
+    // Gather data to write.
     let data_to_write = {
         let data = memory.data(&caller);
         let mut buf = Vec::new();
@@ -714,10 +718,8 @@ pub fn wasi_fd_write(
                 error!("fd_write: iovec out of bounds");
                 return 1;
             }
-            let offset_bytes: [u8; 4] =
-                data[iovec_addr..iovec_addr + 4].try_into().unwrap();
-            let len_bytes: [u8; 4] =
-                data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
+            let offset_bytes: [u8; 4] = data[iovec_addr..iovec_addr + 4].try_into().unwrap();
+            let len_bytes: [u8; 4] = data[iovec_addr + 4..iovec_addr + 8].try_into().unwrap();
             let offset = u32::from_le_bytes(offset_bytes) as usize;
             let len = u32::from_le_bytes(len_bytes) as usize;
             if offset + len > data.len() {
@@ -728,21 +730,21 @@ pub fn wasi_fd_write(
         }
         buf
     };
-
+    
     let total_written = if fd == 1 {
-        // Write to stdout, converting io::Error into i32
+        // Handle stdout.
         io::stdout()
             .write_all(&data_to_write)
             .map(|_| data_to_write.len())
             .map_err(|e| io_err_to_wasi_errno(&e))
     } else if fd == 2 {
-        // Write to stderr, converting io::Error into i32
+        // Handle stderr.
         io::stderr()
             .write_all(&data_to_write)
             .map(|_| data_to_write.len())
             .map_err(|e| io_err_to_wasi_errno(&e))
     } else {
-        // For sandbox file writes: retrieve the FDEntry's host_path.
+        // For sandbox file writes, look up the host path.
         let host_path_opt = {
             let pd = caller.data();
             let table = pd.fd_table.lock().unwrap();
@@ -753,47 +755,97 @@ pub fn wasi_fd_write(
                 _ => None,
             }
         };
-
+    
         if let Some(host_path) = host_path_opt {
-            // Update disk usage with the number of bytes to be written.
+            // Account for the total bytes.
             if let Err(errno) = usage_add(&mut caller, data_to_write.len() as u64) {
                 return errno;
             }
-            // Open the file in append mode.
-            match OpenOptions::new().append(true).open(&host_path) {
-                Ok(mut file) => {
-                    match file.write_all(&data_to_write) {
-                        Ok(_) => {
-                            // Optionally update the in-memory FDEntry buffer.
-                            let mut table = caller.data().fd_table.lock().unwrap();
-                            if let Some(Some(entry)) = table.entries.get_mut(fd as usize) {
-                                entry.buffer.extend_from_slice(&data_to_write);
-                            }
-                            Ok(data_to_write.len())
+            let total = data_to_write.len();
+            let mut offset = 0;
+            while offset < total {
+                // Check free capacity.
+                let available = {
+                    let write_buf = caller.data().write_buffer.lock().unwrap();
+                    caller.data().max_write_buffer.saturating_sub(write_buf.len())
+                };
+    
+                if available == 0 {
+                    // Buffer is full and there is still data to write.
+                    {
+                        let mut state = caller.data().state.lock().unwrap();
+                        *state = ProcessState::Blocked;
+                    }
+                    {
+                        let mut reason = caller.data().block_reason.lock().unwrap();
+                        // Save the host path in the block reason.
+                        *reason = Some(BlockReason::WriteIO(host_path.clone()));
+                    }
+                    caller.data().cond.notify_all();
+                    {
+                        let mut state = caller.data().state.lock().unwrap();
+                        while *state != ProcessState::Running {
+                            state = caller.data().cond.wait(state).unwrap();
                         }
-                        Err(e) => {
-                            error!("fd_write: failed to write to file {}: {}", host_path, e);
-                            Err(io_err_to_wasi_errno(&e))
+                    }
+                    // Once unblocked (scheduler should flush), continue the loop.
+                    continue;
+                } else {
+                    let chunk = min(available, total - offset);
+                    {
+                        let mut write_buf = caller.data().write_buffer.lock().unwrap();
+                        write_buf.extend_from_slice(&data_to_write[offset..offset + chunk]);
+                    }
+                    offset += chunk;
+                    // After appending, if the buffer is full:
+                    let current_size = { caller.data().write_buffer.lock().unwrap().len() };
+                    if current_size == caller.data().max_write_buffer {
+                        if offset < total {
+                            // Buffer full with more data pending: block.
+                            {
+                                let mut state = caller.data().state.lock().unwrap();
+                                *state = ProcessState::Blocked;
+                            }
+                            {
+                                let mut reason = caller.data().block_reason.lock().unwrap();
+                                *reason = Some(BlockReason::WriteIO(host_path.clone()));
+                            }
+                            caller.data().cond.notify_all();
+                            {
+                                let mut state = caller.data().state.lock().unwrap();
+                                while *state != ProcessState::Running {
+                                    state = caller.data().cond.wait(state).unwrap();
+                                }
+                            }
+                            continue;
+                        } else {
+                            // Buffer full but no data remains: flush immediately.
+                            if let Err(errno) = flush_write_buffer(&mut caller, &host_path) {
+                                return errno;
+                            }
                         }
                     }
                 }
-                Err(e) => {
-                    error!("fd_write: failed to open file {}: {}", host_path, e);
-                    Err(io_err_to_wasi_errno(&e))
+            }
+            // Flush any remaining data.
+            if !caller.data().write_buffer.lock().unwrap().is_empty() {
+                if let Err(errno) = flush_write_buffer(&mut caller, &host_path) {
+                    return errno;
                 }
             }
+            Ok(total)
         } else {
             error!("fd_write: unsupported fd: {}", fd);
             Err(1)
         }
     };
-
+    
     let bytes_written = match total_written {
         Ok(n) => n,
         Err(errno) => return errno,
     };
-
-    // Write the number of bytes written back into WASM memory.
+    
+    // Write the number of bytes written into WASM memory.
     {
         let total_written_bytes = (bytes_written as u32).to_le_bytes();
         let nwritten_ptr = nwritten as usize;
@@ -805,6 +857,64 @@ pub fn wasi_fd_write(
         mem_mut[nwritten_ptr..nwritten_ptr + 4].copy_from_slice(&total_written_bytes);
     }
     0
+}
+
+
+/// Flush the process write buffer to the file at `host_path`.
+/// This writes out the entire buffer and then clears it.
+fn flush_write_buffer(
+    caller: &mut Caller<'_, ProcessData>,
+    host_path: &str,
+) -> Result<usize, i32> {
+    let mut buf = caller.data().write_buffer.lock().unwrap();
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    match OpenOptions::new().append(true).open(host_path) {
+        Ok(mut file) => {
+            if let Err(e) = file.write_all(&buf) {
+                error!("flush_write_buffer: failed to write to file {}: {}", host_path, e);
+                return Err(io_err_to_wasi_errno(&e));
+            }
+            let bytes = buf.len();
+            buf.clear();
+            Ok(bytes)
+        }
+        Err(e) => {
+            error!("flush_write_buffer: failed to open file {}: {}", host_path, e);
+            Err(io_err_to_wasi_errno(&e))
+        }
+    }
+}
+
+
+/// flush_write_buffer_for_scheduler flushes all data currently stored in
+/// the process's write buffer (data is stored in an Arc<Mutex<Vec<u8>>> within ProcessData)
+/// by appending it to the file at the given host_path. It then clears the buffer.
+/// Returns the number of bytes flushed, or an errno on failure.
+pub fn flush_write_buffer_for_scheduler(
+    data: &ProcessData,
+    host_path: &str,
+) -> Result<usize, i32> {
+    let mut buf = data.write_buffer.lock().unwrap();
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    match OpenOptions::new().append(true).open(host_path) {
+        Ok(mut file) => {
+            if let Err(e) = file.write_all(&buf) {
+                error!("flush_write_buffer_for_scheduler: failed to write to file {}: {}", host_path, e);
+                return Err(io_err_to_wasi_errno(&e));
+            }
+            let bytes = buf.len();
+            buf.clear();
+            Ok(bytes)
+        }
+        Err(e) => {
+            error!("flush_write_buffer_for_scheduler: failed to open file {}: {}", host_path, e);
+            Err(io_err_to_wasi_errno(&e))
+        }
+    }
 }
 
 

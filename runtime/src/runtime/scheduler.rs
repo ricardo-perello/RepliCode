@@ -1,10 +1,10 @@
 use anyhow::Result;
 use crate::{
-    consensus_input:: {process_consensus_pipe, process_consensus_file},
+    consensus_input:: {process_consensus_file, process_consensus_pipe},
     runtime::{
         clock::GlobalClock,
         process::{BlockReason, Process, ProcessState},
-    },
+    }, wasi_syscalls::fs::flush_write_buffer_for_scheduler,
 };
 use std::{collections::VecDeque, fs};
 use std::io::Read;
@@ -136,6 +136,12 @@ where
                                     fd_table.has_pending_input(0)
                                 };
                                 fd_has_input
+                            }
+                            Some(BlockReason::WriteIO(ref path)) => {
+                                match flush_write_buffer_for_scheduler(&proc.data, path) {
+                                    Ok(_bytes) => true,  // Flushed successfully: unblock the process.
+                                    Err(_errno) => false // If flush fails, keep the process blocked.
+                                }
                             }
                             Some(BlockReason::Timeout { resume_after }) => GlobalClock::now() >= resume_after,
                             _ => false,
