@@ -32,12 +32,12 @@ int main(void) {
         return 1;
     }
     const char* msg = "Hello from inside example_dir!\n";
-    // ssize_t written = write(fd, msg, strlen(msg));
-    // if (written < 0) {
-    //     perror("write failed");
-    //     close(fd);
-    //     return 1;
-    // }
+    ssize_t written = write(fd, msg, strlen(msg));
+    if (written < 0) {
+        perror("write failed");
+        close(fd);
+        return 1;
+    }
     close(fd);
     printf("Wrote a test file inside 'example_dir'.\n");
 
