@@ -75,7 +75,7 @@ fn usage_sub(caller: &mut Caller<'_, ProcessData>, bytes: u64) {
 
 /// If you remove a directory, or some other operation, and need to figure out how many
 /// bytes were in that directory, you can do a quick naive walk:
-fn get_dir_size(path: &Path) -> io::Result<u64> {
+pub fn get_dir_size(path: &Path) -> io::Result<u64> {
     let mut size = 0;
     for entry in fs::read_dir(path)? {
         let entry = entry?;

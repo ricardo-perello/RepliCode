@@ -134,9 +134,15 @@ pub fn process_consensus_pipe<R: Read>(consensus_pipe: &mut R, processes: &mut V
                 let new_pid = get_next_pid();
                 // For the init command, the payload is a WASM binary.
                 // Use the raw payload bytes directly, not the empty msg_str
-                let proc = process::start_process_from_bytes(payload, new_pid)?;
-                processes.push(proc);
-                info!("Added new process {} to scheduler", new_pid);
+                match process::start_process_from_bytes(payload, new_pid) {
+                    Ok(proc) => {
+                        processes.push(proc);
+                        info!("Added new process {} to scheduler (via file)", new_pid);
+                    }
+                    Err(e) => {
+                        error!("Failed to create new process {}: {}", new_pid, e);
+                    }
+                }
             },
             3 => { // Msg command.
                 // Expected format: "msg:<message>" or just the message.
@@ -306,9 +312,15 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<process::Proc
             2 => { // Init command.
                 info!("Received init command from consensus file.");
                 let new_pid = get_next_pid(); // Assumes get_next_pid is public.
-                let proc = process::start_process_from_bytes(payload, new_pid)?;
-                processes.push(proc);
-                info!("Added new process {} to scheduler (via file)", new_pid);
+                match process::start_process_from_bytes(payload, new_pid) {
+                    Ok(proc) => {
+                        processes.push(proc);
+                        info!("Added new process {} to scheduler (via file)", new_pid);
+                    }
+                    Err(e) => {
+                        error!("Failed to create new process {}: {}", new_pid, e);
+                    }
+                }
             },
             3 => { // Msg command.
                 let message = if let Some(msg_part) = msg_str.strip_prefix("msg:") {

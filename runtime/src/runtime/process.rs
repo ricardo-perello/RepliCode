@@ -6,8 +6,8 @@ use std::{
 use wasmtime::{Engine, Module, Store, Linker};
 
 use crate::{
-    runtime::fd_table::{FDTable, FDEntry},
-    wasi_syscalls,
+    runtime::fd_table::{FDEntry, FDTable},
+    wasi_syscalls::{self, fs::get_dir_size},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -99,14 +99,40 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
     let fd_table = Arc::new(Mutex::new(FDTable::new(process_root.clone())));
     fs::create_dir_all(&process_root)?;
 
+    let max_disk_usage = 1024 * 1024 * 10;
     // Optionally preload a directory
+    let preload_size;
     if let Some(src_dir) = &preload_dir {
         if src_dir.exists() {
             copy_dir_recursive(src_dir, &process_root)?;
             info!("Preloaded {:?} into sandbox for process {}", src_dir, id);
+
+            preload_size = match get_dir_size(&process_root) {
+                Ok(sz) => sz,
+                Err(e) => {
+                    error!("Cannot compute size of preloaded data: {}", e);
+                    0
+                }
+            };
+
+            if preload_size > max_disk_usage {
+                // TODO handle it (e.g. kill or fail)
+                error!(
+                    "Preloaded data ({}) exceeds disk quota ({}) for process {}! Aborting...",
+                    preload_size, max_disk_usage, id
+                );
+                // Clean up the partially-created sandbox directory.
+                let _ = fs::remove_dir_all(&process_root);
+                // Return an error so the caller knows the process wasn't started.
+                return Err(anyhow::anyhow!("Preloaded data exceeds disk quota; process not created."));
+            }
+
         } else {
+            preload_size = 0;
             error!("Preload directory {:?} does not exist", src_dir);
         }
+    } else {
+        preload_size = 0;
     }
 
     let process_data = ProcessData {
@@ -115,8 +141,8 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
         block_reason,
         fd_table,
         root_path: process_root,
-        max_disk_usage: 1024 * 1024 * 10, // 10MB default limit
-        current_disk_usage: Arc::new(Mutex::new(0)),
+        max_disk_usage: max_disk_usage, // 10MB default limit
+        current_disk_usage: Arc::new(Mutex::new(preload_size)),
         write_buffer: Arc::new(Mutex::new(Vec::new())),
         max_write_buffer: 1024,
     };
