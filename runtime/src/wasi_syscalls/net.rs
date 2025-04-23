@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use consensus::commands::NetworkOperation;
 use anyhow::Result;
-use log::{info, error};
+use log::{info, error, debug};
 
 #[derive(Debug, Clone)]
 pub struct OutgoingNetworkMessage {
@@ -22,6 +22,8 @@ pub fn wasi_sock_open(
     protocol: i32,
     sock_fd_out: i32,
 ) -> i32 {
+    debug!("wasi_sock_open called with domain={}, socktype={}, protocol={}, sock_fd_out={}", 
+        domain, socktype, protocol, sock_fd_out);
     let pid;
     let src_port;
     let fd;
@@ -35,6 +37,7 @@ pub fn wasi_sock_open(
             *port += 1;
             *port
         };
+        debug!("Allocated port {} for process {}", src_port, pid);
 
         // Queue the connect operation
         let op = NetworkOperation::Connect {
@@ -47,9 +50,11 @@ pub fn wasi_sock_open(
             pid,
             operation: op,
         });
+        info!("Queued connect operation for process {}:{}", pid, src_port);
     }
     
     // Block until consensus processes this
+    debug!("Blocking process {} for network operation", pid);
     block_process_for_network(&mut caller);
     
     // Create FD entry for the socket
@@ -61,23 +66,25 @@ pub fn wasi_sock_open(
             local_port: src_port,
             connected: false,
         });
+        info!("Created socket FD {} for process {}:{}", fd, pid, src_port);
     }
     
     // Write FD back to WASM memory
     let memory = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(mem)) => mem,
         _ => {
-            eprintln!("sock_open: no memory export found");
+            error!("sock_open: no memory export found");
             return 1;
         }
     };
     let mem_mut = memory.data_mut(&mut caller);
     let out_ptr = sock_fd_out as usize;
     if out_ptr + 4 > mem_mut.len() {
-        eprintln!("sock_open: sock_fd_out pointer out of bounds");
+        error!("sock_open: sock_fd_out pointer out of bounds");
         return 1;
     }
     mem_mut[out_ptr..out_ptr+4].copy_from_slice(&(fd as u32).to_le_bytes());
+    debug!("Wrote socket FD {} to memory at offset {}", fd, out_ptr);
     0
 }
 
@@ -89,6 +96,8 @@ pub fn wasi_sock_send(
     si_flags: i32,
     ret_data_len: i32,
 ) -> i32 {
+    debug!("wasi_sock_send called with fd={}, si_data={}, si_data_len={}, si_flags={}, ret_data_len={}", 
+        fd, si_data, si_data_len, si_flags, ret_data_len);
     let pid;
     let src_port;
     let data;
@@ -97,10 +106,14 @@ pub fn wasi_sock_send(
     {
         let memory = match caller.get_export("memory") {
             Some(wasmtime::Extern::Memory(mem)) => mem,
-            _ => return 1,
+            _ => {
+                error!("sock_send: no memory export found");
+                return 1;
+            }
         };
         let mem = memory.data(&caller);
         data = mem[si_data as usize..(si_data + si_data_len) as usize].to_vec();
+        debug!("Read {} bytes from memory for send operation", data.len());
     }
 
     // Then handle process data
@@ -114,6 +127,7 @@ pub fn wasi_sock_send(
             if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, .. })) = table.entries.get(fd as usize) {
                 *local_port
             } else {
+                error!("Invalid socket FD {} for process {}", fd, pid);
                 return 1; // Invalid FD
             }
         };
@@ -128,20 +142,26 @@ pub fn wasi_sock_send(
             pid,
             operation: op,
         });
+        info!("Queued send operation for process {}:{} ({} bytes)", pid, src_port, data.len());
     }
     
     // Block until consensus processes this
+    debug!("Blocking process {} for network operation", pid);
     block_process_for_network(&mut caller);
 
     // Write the number of bytes sent back to memory
     {
         let memory = match caller.get_export("memory") {
             Some(wasmtime::Extern::Memory(mem)) => mem,
-            _ => return 1,
+            _ => {
+                error!("sock_send: no memory export found for return value");
+                return 1;
+            }
         };
         let mem_mut = memory.data_mut(&mut caller);
         let ret_data_len_bytes = (data.len() as u32).to_le_bytes();
         mem_mut[ret_data_len as usize..(ret_data_len + 4) as usize].copy_from_slice(&ret_data_len_bytes);
+        debug!("Wrote return value {} to memory at offset {}", data.len(), ret_data_len);
     }
     0
 }
@@ -150,6 +170,7 @@ pub fn wasi_sock_close(
     mut caller: Caller<'_, ProcessData>,
     fd: i32,
 ) -> i32 {
+    debug!("wasi_sock_close called with fd={}", fd);
     let process_data = caller.data();
     let pid = process_data.id;
     
@@ -159,6 +180,7 @@ pub fn wasi_sock_close(
         if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, .. })) = table.entries.get(fd as usize) {
             *local_port
         } else {
+            error!("Invalid socket FD {} for process {}", fd, pid);
             return 1; // Invalid FD
         }
     };
@@ -172,8 +194,10 @@ pub fn wasi_sock_close(
         pid,
         operation: op,
     });
+    info!("Queued close operation for process {}:{}", pid, src_port);
     
     // Block until consensus processes this
+    debug!("Blocking process {} for network operation", pid);
     block_process_for_network(&mut caller);
     0
 }
@@ -235,7 +259,7 @@ fn block_process_for_network(caller: &mut Caller<'_, ProcessData>) {
     {
         let mut state = caller.data().state.lock().unwrap();
         if *state == ProcessState::Running {
-            println!("Network IO: Setting process state to Blocked");
+            debug!("Setting process state to Blocked for network operation");
             *state = ProcessState::Blocked;
         }
         let mut reason = caller.data().block_reason.lock().unwrap();
@@ -245,6 +269,8 @@ fn block_process_for_network(caller: &mut Caller<'_, ProcessData>) {
 
     let mut state = caller.data().state.lock().unwrap();
     while *state != ProcessState::Running {
+        debug!("Process waiting for network operation to complete");
         state = caller.data().cond.wait(state).unwrap();
     }
+    debug!("Process resumed after network operation");
 }

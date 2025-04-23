@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::{TcpStream, SocketAddr};
 use std::io::{Write, Read};
-use log::{info, error};
+use log::{info, error, debug};
 use crate::commands::NetworkOperation;
 
 struct NatEntry {
@@ -19,6 +19,7 @@ pub struct NatTable {
 
 impl NatTable {
     pub fn new() -> Self {
+        info!("Creating new NAT table");
         NatTable {
             port_mappings: HashMap::new(),
             process_ports: HashMap::new(),
@@ -29,10 +30,12 @@ impl NatTable {
     fn allocate_port(&mut self) -> u16 {
         let port = self.next_port;
         self.next_port += 1;
+        debug!("Allocated new NAT port: {}", port);
         port
     }
 
     pub fn handle_network_operation(&mut self, pid: u64, op: NetworkOperation) -> Result<(), Box<dyn std::error::Error>> {
+        debug!("Handling network operation for process {}: {:?}", pid, op);
         match op {
             NetworkOperation::Connect { dest_addr, dest_port, src_port } => {
                 let consensus_port = self.allocate_port();
@@ -59,6 +62,7 @@ impl NatTable {
                 }
             }
             NetworkOperation::Send { src_port, data } => {
+                debug!("Processing send operation for process {}:{} ({} bytes)", pid, src_port, data.len());
                 if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
                     if let Some(entry) = self.port_mappings.get_mut(&consensus_port) {
                         if let Err(e) = entry.connection.write_all(&data) {
@@ -67,13 +71,18 @@ impl NatTable {
                         }
                         info!("Sent {} bytes to {}:{}", data.len(), pid, src_port);
                     }
+                } else {
+                    error!("No NAT mapping found for process {}:{}", pid, src_port);
                 }
             }
             NetworkOperation::Close { src_port } => {
+                debug!("Processing close operation for process {}:{}", pid, src_port);
                 if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
                     self.port_mappings.remove(&consensus_port);
                     self.process_ports.remove(&(pid, src_port));
                     info!("Closed NAT entry for {}:{}", pid, src_port);
+                } else {
+                    error!("No NAT mapping found to close for process {}:{}", pid, src_port);
                 }
             }
         }
@@ -81,6 +90,7 @@ impl NatTable {
     }
 
     pub fn check_for_incoming_data(&mut self) -> Vec<(u64, u16, Vec<u8>)> {
+        debug!("Checking for incoming data on all NAT connections");
         let mut messages = Vec::new();
         let mut to_remove = Vec::new();
 
@@ -88,10 +98,11 @@ impl NatTable {
             let mut buf = [0u8; 1024];
             match entry.connection.read(&mut buf) {
                 Ok(0) => {
-                    // Connection closed by remote
+                    debug!("Connection closed by remote for {}:{}", entry.process_id, entry.process_port);
                     to_remove.push(*consensus_port);
                 }
                 Ok(n) => {
+                    debug!("Received {} bytes from {}:{}", n, entry.process_id, entry.process_port);
                     messages.push((
                         entry.process_id,
                         entry.process_port,

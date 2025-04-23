@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::fs::File;
 use byteorder::{LittleEndian, ReadBytesExt};
-use log::{info, error};
+use log::{info, error, debug};
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::runtime::clock::GlobalClock;
 use crate::runtime::process;
@@ -37,10 +37,12 @@ pub fn process_consensus_pipe<R: Read + Write>(
     processes: &mut Vec<process::Process>,
     outgoing_messages: Vec<OutgoingNetworkMessage>,
 ) -> Result<bool> {
+    debug!("Processing consensus pipe with {} outgoing messages", outgoing_messages.len());
     let mut reader = BufReader::new(consensus_pipe);
 
     // First, send any outgoing network messages
     for msg in outgoing_messages {
+        debug!("Sending outgoing network message for process {}: {:?}", msg.pid, msg.operation);
         // Write message type (NetworkOut = 5)
         reader.get_mut().write_all(&[5])?;
         
@@ -57,9 +59,11 @@ pub fn process_consensus_pipe<R: Read + Write>(
         // Read the message type (1 byte)
         let mut msg_type_buf = [0u8; 1];
         if reader.read_exact(&mut msg_type_buf).is_err() {
+            debug!("No more data in consensus pipe");
             break; // No more data.
         }
         let msg_type = msg_type_buf[0];
+        debug!("Received message type {} from consensus pipe", msg_type);
 
         // Read process_id (8 bytes)
         let process_id = match reader.read_u64::<LittleEndian>() {
@@ -113,22 +117,24 @@ pub fn process_consensus_pipe<R: Read + Write>(
                 }
                 break; // End of batch.
             },
-            1 => { // FD update. Expected format: "fd:<number>,body:<data>"
+            1 => { // FDMsg update.
+                debug!("Processing FDMsg update for process {}: {} bytes", process_id, payload.len());
+                let msg_str = String::from_utf8_lossy(&payload);
                 let parts: Vec<&str> = msg_str.split(",body:").collect();
                 if parts.len() != 2 {
-                    error!("Invalid pipe message format for FD update: {}", msg_str);
+                    error!("Invalid FDMsg format for process {}: {}", process_id, msg_str);
                     continue;
                 }
                 let fd: i32 = if let Some(fd_part) = parts[0].strip_prefix("fd:") {
                     match fd_part.trim().parse() {
                         Ok(num) => num,
                         Err(_) => {
-                            error!("Invalid FD in pipe message: {}", msg_str);
+                            error!("Invalid FD in FDMsg for process {}: {}", process_id, msg_str);
                             continue;
                         }
                     }
                 } else {
-                    error!("Missing FD prefix in pipe message: {}", msg_str);
+                    error!("Missing FD prefix in FDMsg for process {}: {}", process_id, msg_str);
                     continue;
                 };
                 let body = parts[1].trim();
@@ -140,74 +146,40 @@ pub fn process_consensus_pipe<R: Read + Write>(
                         if let Some(Some(FDEntry::File { buffer, .. })) = table.entries.get_mut(fd as usize) {
                             buffer.extend_from_slice(body.as_bytes());
                             buffer.push(b'\n');
-                            info!("Added input to process {}'s FD {} (via pipe)", process_id, fd);
+                            info!("Added FDMsg to process {}'s FD {} ({} bytes)", process_id, fd, body.len());
                         } else {
-                            error!("Process {} does not have FD {} open (via pipe)", process_id, fd);
+                            error!("Process {} does not have FD {} open for FDMsg", process_id, fd);
                         }
                         process.data.cond.notify_all();
                         break;
                     }
                 }
                 if !found {
-                    error!("No process found with ID {} (via pipe)", process_id);
+                    error!("No process found with ID {} for FDMsg", process_id);
                 }
             },
             2 => { // Init command.
-                info!("Received init command from consensus.");
+                info!("Received init command from consensus");
                 let new_pid = get_next_pid();
-                // For the init command, the payload is a WASM binary.
-                // Use the raw payload bytes directly, not the empty msg_str
                 match process::start_process_from_bytes(payload, new_pid) {
                     Ok(proc) => {
                         processes.push(proc);
-                        info!("Added new process {} to scheduler (via file)", new_pid);
+                        info!("Added new process {} to scheduler", new_pid);
                     }
                     Err(e) => {
                         error!("Failed to create new process {}: {}", new_pid, e);
                     }
                 }
             },
-            3 => { // Msg command.
-                // Expected format: "msg:<message>" or just the message.
-                let message = if let Some(msg_part) = msg_str.strip_prefix("msg:") {
-                    msg_part.trim()
-                } else {
-                    msg_str.trim()
-                };
-                let mut found = false;
-                for process in processes.iter_mut() {
-                    if process.id == process_id {
-                        found = true;
-                        // For this example, send the message to FD 0.
-                        let mut table = process.data.fd_table.lock().unwrap();
-                        if let Some(Some(FDEntry::File { buffer, .. })) = table.entries.get_mut(0) {
-                            buffer.extend_from_slice(message.as_bytes());
-                            buffer.push(b'\n');
-                            info!("Added msg to process {}'s FD 0", process_id);
-                        } else {
-                            error!("Process {} does not have FD 0 open for msg", process_id);
-                        }
-                        process.data.cond.notify_all();
-                        break;
-                    }
-                }
-                if !found {
-                    error!("No process found with ID {} for msg", process_id);
-                }
-            },
-            4 => { // FTP update.
-                info!("Received FTP command for process {}: {}", process_id, msg_str);
-                // Insert logic here to dispatch the FTP command to the process.
-            },
-            5 => { // NetworkIn
-                let pid = process_id;
+            3 => { // NetworkIn
+                debug!("Processing NetworkIn for process {}", process_id);
                 let dest_port = reader.read_u16::<LittleEndian>()?;
                 let payload_len = reader.read_u32::<LittleEndian>()? as usize;
                 let mut payload = vec![0u8; payload_len];
                 reader.read_exact(&mut payload)?;
 
                 for process in processes.iter_mut() {
-                    if process.id == pid {
+                    if process.id == process_id {
                         let mut table = process.data.fd_table.lock().unwrap();
                         if let Some(Some(FDEntry::Socket { .. })) = table.entries.get_mut(0) {
                             // TODO: Find the correct socket FD based on port
@@ -215,6 +187,7 @@ pub fn process_consensus_pipe<R: Read + Write>(
                             if let Some(Some(FDEntry::File { buffer, .. })) = table.entries.get_mut(0) {
                                 buffer.extend_from_slice(&payload);
                                 buffer.push(b'\n');
+                                info!("Added NetworkIn data to process {}'s FD 0 ({} bytes)", process_id, payload.len());
                             }
                         }
                         process.data.cond.notify_all();
@@ -222,8 +195,13 @@ pub fn process_consensus_pipe<R: Read + Write>(
                     }
                 }
             },
+            4 => { // NetworkOut
+                debug!("Processing NetworkOut for process {}", process_id);
+                // NetworkOut messages are handled in the outgoing_messages parameter
+                // No need to process them here as they are already handled
+            },
             _ => {
-                error!("Unknown message type: {} in message: {}", msg_type, msg_str);
+                error!("Unknown message type: {} in message", msg_type);
             }
         }
     }
@@ -231,11 +209,13 @@ pub fn process_consensus_pipe<R: Read + Write>(
 }
 
 pub fn process_consensus_file(file_path: &str, processes: &mut Vec<process::Process>) -> Result<bool> {
+    debug!("Processing consensus file: {}", file_path);
     let file = File::open(file_path)?;
     let mut reader = BufReader::new(file);
     
     // Seek to the current position
     let current_pos = FILE_POSITION.load(Ordering::SeqCst);
+    debug!("Seeking to position {} in consensus file", current_pos);
     reader.seek(SeekFrom::Start(current_pos))?;
     
     let mut processed_something = false;
@@ -311,6 +291,7 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<process::Proc
                 return Ok(true);
             },
             1 => { // FD update.
+                debug!("Processing FD update for process {}: {}", process_id, msg_str);
                 let parts: Vec<&str> = msg_str.split(",body:").collect();
                 if parts.len() != 2 {
                     error!("Invalid file message format for FD update: {}", msg_str);
@@ -356,8 +337,8 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<process::Proc
                 }
             },
             2 => { // Init command.
-                info!("Received init command from consensus file.");
-                let new_pid = get_next_pid(); // Assumes get_next_pid is public.
+                info!("Received init command from consensus file");
+                let new_pid = get_next_pid();
                 match process::start_process_from_bytes(payload, new_pid) {
                     Ok(proc) => {
                         processes.push(proc);
@@ -369,6 +350,7 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<process::Proc
                 }
             },
             3 => { // Msg command.
+                debug!("Processing message command for process {}: {}", process_id, msg_str);
                 let message = if let Some(msg_part) = msg_str.strip_prefix("msg:") {
                     msg_part.trim()
                 } else {
@@ -401,10 +383,7 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<process::Proc
                 }
             },
             4 => { // FTP update.
-                info!(
-                    "Received FTP command for process {}: {} (via file)",
-                    process_id, msg_str
-                );
+                info!("Received FTP command for process {}: {} (via file)", process_id, msg_str);
                 // Add FTP command dispatch logic here if needed.
             },
             _ => {
