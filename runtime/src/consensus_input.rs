@@ -1,11 +1,15 @@
 use anyhow::Result;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::fs::File;
 use byteorder::{LittleEndian, ReadBytesExt};
 use log::{info, error};
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::runtime::clock::GlobalClock;
 use crate::runtime::process;
+use crate::wasi_syscalls::net::OutgoingNetworkMessage;
+use crate::runtime::fd_table::FDEntry;
+use bincode;
+
 // Use an AtomicU64 for generating unique process IDs.
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 // Track file position for consensus file
@@ -27,8 +31,27 @@ fn get_next_pid() -> u64 {
 /// - **3**: Msg command. The payload is expected to be `"msg:<message>"` (or just a message),
 ///        and the message is sent (for example, to FD 0).
 /// - **4**: FTP update. (Logic to dispatch the FTP command can be added.)
-pub fn process_consensus_pipe<R: Read>(consensus_pipe: &mut R, processes: &mut Vec<process::Process>) -> Result<bool> {
+/// - **5**: NetworkIn. The payload is expected to be a network message.
+pub fn process_consensus_pipe<R: Read + Write>(
+    consensus_pipe: &mut R, 
+    processes: &mut Vec<process::Process>,
+    outgoing_messages: Vec<OutgoingNetworkMessage>,
+) -> Result<bool> {
     let mut reader = BufReader::new(consensus_pipe);
+
+    // First, send any outgoing network messages
+    for msg in outgoing_messages {
+        // Write message type (NetworkOut = 5)
+        reader.get_mut().write_all(&[5])?;
+        
+        // Write process ID
+        reader.get_mut().write_all(&msg.pid.to_le_bytes())?;
+        
+        // Serialize and write the network operation
+        let op_bytes = bincode::serialize(&msg.operation)?;
+        reader.get_mut().write_all(&(op_bytes.len() as u32).to_le_bytes())?;
+        reader.get_mut().write_all(&op_bytes)?;
+    }
 
     loop {
         // Read the message type (1 byte)
@@ -44,8 +67,8 @@ pub fn process_consensus_pipe<R: Read>(consensus_pipe: &mut R, processes: &mut V
             Err(_) => break,
         };
 
-        // Read payload length (2 bytes)
-        let payload_len = match reader.read_u16::<LittleEndian>() {
+        // Read payload length (4 bytes)
+        let payload_len = match reader.read_u32::<LittleEndian>() {
             Ok(sz) => sz as usize,
             Err(_) => break,
         };
@@ -114,9 +137,9 @@ pub fn process_consensus_pipe<R: Read>(consensus_pipe: &mut R, processes: &mut V
                     if process.id == process_id {
                         found = true;
                         let mut table = process.data.fd_table.lock().unwrap();
-                        if let Some(Some(fd_entry)) = table.entries.get_mut(fd as usize) {
-                            fd_entry.buffer.extend_from_slice(body.as_bytes());
-                            fd_entry.buffer.push(b'\n');
+                        if let Some(Some(FDEntry::File { buffer, .. })) = table.entries.get_mut(fd as usize) {
+                            buffer.extend_from_slice(body.as_bytes());
+                            buffer.push(b'\n');
                             info!("Added input to process {}'s FD {} (via pipe)", process_id, fd);
                         } else {
                             error!("Process {} does not have FD {} open (via pipe)", process_id, fd);
@@ -157,9 +180,9 @@ pub fn process_consensus_pipe<R: Read>(consensus_pipe: &mut R, processes: &mut V
                         found = true;
                         // For this example, send the message to FD 0.
                         let mut table = process.data.fd_table.lock().unwrap();
-                        if let Some(Some(fd_entry)) = table.entries.get_mut(0) {
-                            fd_entry.buffer.extend_from_slice(message.as_bytes());
-                            fd_entry.buffer.push(b'\n');
+                        if let Some(Some(FDEntry::File { buffer, .. })) = table.entries.get_mut(0) {
+                            buffer.extend_from_slice(message.as_bytes());
+                            buffer.push(b'\n');
                             info!("Added msg to process {}'s FD 0", process_id);
                         } else {
                             error!("Process {} does not have FD 0 open for msg", process_id);
@@ -175,6 +198,29 @@ pub fn process_consensus_pipe<R: Read>(consensus_pipe: &mut R, processes: &mut V
             4 => { // FTP update.
                 info!("Received FTP command for process {}: {}", process_id, msg_str);
                 // Insert logic here to dispatch the FTP command to the process.
+            },
+            5 => { // NetworkIn
+                let pid = process_id;
+                let dest_port = reader.read_u16::<LittleEndian>()?;
+                let payload_len = reader.read_u32::<LittleEndian>()? as usize;
+                let mut payload = vec![0u8; payload_len];
+                reader.read_exact(&mut payload)?;
+
+                for process in processes.iter_mut() {
+                    if process.id == pid {
+                        let mut table = process.data.fd_table.lock().unwrap();
+                        if let Some(Some(FDEntry::Socket { .. })) = table.entries.get_mut(0) {
+                            // TODO: Find the correct socket FD based on port
+                            // For now, just use FD 0
+                            if let Some(Some(FDEntry::File { buffer, .. })) = table.entries.get_mut(0) {
+                                buffer.extend_from_slice(&payload);
+                                buffer.push(b'\n');
+                            }
+                        }
+                        process.data.cond.notify_all();
+                        break;
+                    }
+                }
             },
             _ => {
                 error!("Unknown message type: {} in message: {}", msg_type, msg_str);
@@ -211,8 +257,8 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<process::Proc
             Err(_) => return Ok(processed_something), // End of file
         };
 
-        // Read payload length (2 bytes)
-        let payload_len = match reader.read_u16::<LittleEndian>() {
+        // Read payload length (4 bytes)
+        let payload_len = match reader.read_u32::<LittleEndian>() {
             Ok(sz) => sz as usize,
             Err(_) => return Ok(processed_something), // End of file
         };
@@ -288,9 +334,9 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<process::Proc
                     if process.id == process_id {
                         found = true;
                         let mut table = process.data.fd_table.lock().unwrap();
-                        if let Some(Some(fd_entry)) = table.entries.get_mut(fd as usize) {
-                            fd_entry.buffer.extend_from_slice(body.as_bytes());
-                            fd_entry.buffer.push(b'\n');
+                        if let Some(Some(FDEntry::File { buffer, .. })) = table.entries.get_mut(fd as usize) {
+                            buffer.extend_from_slice(body.as_bytes());
+                            buffer.push(b'\n');
                             info!(
                                 "Added input to process {}'s FD {} (via file)",
                                 process_id, fd
@@ -333,9 +379,9 @@ pub fn process_consensus_file(file_path: &str, processes: &mut Vec<process::Proc
                     if process.id == process_id {
                         found = true;
                         let mut table = process.data.fd_table.lock().unwrap();
-                        if let Some(Some(fd_entry)) = table.entries.get_mut(0) {
-                            fd_entry.buffer.extend_from_slice(message.as_bytes());
-                            fd_entry.buffer.push(b'\n');
+                        if let Some(Some(FDEntry::File { buffer, .. })) = table.entries.get_mut(0) {
+                            buffer.extend_from_slice(message.as_bytes());
+                            buffer.push(b'\n');
                             info!(
                                 "Added msg to process {}'s FD 0 (via file)",
                                 process_id

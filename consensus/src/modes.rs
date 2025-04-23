@@ -35,7 +35,8 @@ pub fn run_benchmark_mode() -> io::Result<()> {
                 Command::Init(_, _) => info!("Initialization record written."),
                 Command::FDMsg(pid, _) => info!("Message record for process {} written.", pid),
                 Command::Clock(delta) => info!("Clock record ({} ns) written.", delta),
-                Command::Ftp(pid, cmd) => info!("FTP command for process {} written: {}", pid, cmd),
+                Command::NetworkIn(pid, port, _) => info!("Network input record for process {} port {} written.", pid, port),
+                Command::NetworkOut(pid, _) => info!("Network output record for process {} written.", pid),
             }
         }
     }

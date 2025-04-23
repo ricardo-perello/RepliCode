@@ -3,6 +3,7 @@ use std::io;
 use std::convert::TryInto;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
 use crate::runtime::clock::GlobalClock;
+use crate::runtime::fd_table::FDEntry;
 use log::{info, error};
 
 
@@ -27,28 +28,24 @@ pub fn wasi_fd_read(
     nread: i32,
 ) -> i32 {
     loop {
-        // Lock the FD table and try to extract data.
         let (data_to_read, bytes_to_advance) = {
             let process_data = caller.data();
             let mut table = process_data.fd_table.lock().unwrap();
-            let fd_entry = match table.get_fd_entry_mut(fd) {
-                Some(entry) => entry,
+            match table.get_fd_entry_mut(fd) {
+                Some(FDEntry::File { buffer, read_ptr, .. }) => {
+                    if *read_ptr >= buffer.len() {
+                        drop(table);
+                        block_process_for_stdin(&mut caller);
+                        continue;
+                    }
+                    let available_data = &buffer[*read_ptr..];
+                    (available_data.to_vec(), available_data.len())
+                }
                 _ => {
                     error!("fd_read called with invalid FD: {}", fd);
                     return 1;
                 }
-            };
-
-            // If no data is available, then we want to block.
-            if fd_entry.read_ptr >= fd_entry.buffer.len() {
-                // Drop the lock and wait until input is available.
-                drop(table);
-                block_process_for_stdin(&mut caller);
-                continue;
             }
-            // Otherwise, clone available data.
-            let available_data = &fd_entry.buffer[fd_entry.read_ptr..];
-            (available_data.to_vec(), available_data.len())
         };
 
         // At this point, data is available, so proceed to copy it into the WASM memory.
@@ -132,8 +129,9 @@ pub fn wasi_fd_read(
         {
             let process_data = caller.data();
             let mut table = process_data.fd_table.lock().unwrap();
-            let fd_entry = table.get_fd_entry_mut(fd).unwrap();
-            fd_entry.read_ptr += bytes_to_advance;
+            if let Some(FDEntry::File { read_ptr, .. }) = table.get_fd_entry_mut(fd) {
+                *read_ptr += bytes_to_advance;
+            }
         }
         return 0;
     }
@@ -180,11 +178,10 @@ pub fn wasi_fd_prestat_get(
         if fd < 0 || (fd as usize) >= crate::runtime::fd_table::MAX_FDS {
             return 8; // invalid FD
         }
-        let entry = match &table.entries[fd as usize] {
-            Some(e) => e,
-            None => return 8,
-        };
-        (entry.is_preopen, entry.is_directory)
+        match &table.entries[fd as usize] {
+            Some(FDEntry::File { is_preopen, is_directory, .. }) => (*is_preopen, *is_directory),
+            _ => return 8,
+        }
     };
 
     // Only preopened directories should be returned

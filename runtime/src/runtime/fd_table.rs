@@ -3,28 +3,63 @@ use std::path::PathBuf;
 
 use log::debug;
 
-pub struct FDEntry {
-    pub buffer: Vec<u8>,    // data waiting to be read
-    pub read_ptr: usize,    // how far we've read from buffer
-    pub is_directory: bool,
-    pub is_preopen: bool,
-    pub host_path: Option<String>, // the actual host filesystem path
+#[derive(Debug, Clone)]
+pub enum FDEntry {
+    File {
+        buffer: Vec<u8>,    // data waiting to be read
+        read_ptr: usize,    // how far we've read from buffer
+        is_directory: bool,
+        is_preopen: bool,
+        host_path: Option<String>, // the actual host filesystem path
+    },
+    Socket {
+        local_port: u16,
+        connected: bool,
+    },
 }
 
 impl fmt::Display for FDEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let buffer_str = match std::str::from_utf8(&self.buffer) {
-            Ok(s) => s.to_string(),
-            Err(_) => format!("{:?}", self.buffer),
-        };
-        write!(
-            f,
-            "FDEntry(buffer: \"{}\", read_ptr: {}, is_dir={}, is_preopen={}, host_path={:?})",
-            buffer_str, self.read_ptr, self.is_directory, self.is_preopen, self.host_path
-        )
+        match self {
+            FDEntry::File { buffer, read_ptr, is_directory, is_preopen, host_path } => {
+                let buffer_str = match std::str::from_utf8(&buffer) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => format!("{:?}", buffer),
+                };
+                write!(
+                    f,
+                    "FDEntry(buffer: \"{}\", read_ptr: {}, is_dir={}, is_preopen={}, host_path={:?})",
+                    buffer_str, read_ptr, is_directory, is_preopen, host_path
+                )
+            },
+            FDEntry::Socket { local_port, connected } => {
+                write!(f, "Socket(local_port: {}, connected: {})", local_port, connected)
+            },
+        }
     }
 }
 
+impl FDEntry {
+    pub fn new_file(host_path: Option<String>) -> Self {
+        FDEntry::File {
+            buffer: Vec::new(),
+            read_ptr: 0,
+            is_directory: false,
+            is_preopen: false,
+            host_path,
+        }
+    }
+
+    pub fn new_directory(host_path: String) -> Self {
+        FDEntry::File {
+            buffer: Vec::new(),
+            read_ptr: 0,
+            is_directory: true,
+            is_preopen: true,
+            host_path: Some(host_path),
+        }
+    }
+}
 
 pub const MAX_FDS: usize = 8; // or bigger if needed
 
@@ -39,28 +74,28 @@ impl FDTable {
         };
         
         // Initialize standard file descriptors (stdin, stdout, stderr)
-        table.entries[0] = Some(FDEntry {  // stdin
+        table.entries[0] = Some(FDEntry::File {  // stdin
             buffer: Vec::new(),
             read_ptr: 0,
             is_directory: false,
             is_preopen: false,
             host_path: None,
         });
-        table.entries[1] = Some(FDEntry {  // stdout
+        table.entries[1] = Some(FDEntry::File {  // stdout
             buffer: Vec::new(),
             read_ptr: 0,
             is_directory: false,
             is_preopen: false,
             host_path: None,
         });
-        table.entries[2] = Some(FDEntry {  // stderr
+        table.entries[2] = Some(FDEntry::File {  // stderr
             buffer: Vec::new(),
             read_ptr: 0,
             is_directory: false,
             is_preopen: false,
             host_path: None,
         });
-        table.entries[3] = Some(FDEntry {
+        table.entries[3] = Some(FDEntry::File {
             buffer: Vec::new(),
             read_ptr: 0,
             is_directory: true,
@@ -73,7 +108,10 @@ impl FDTable {
     pub fn has_pending_input(&self, fd: i32) -> bool {
         debug!("Checking FD {} for pending input", fd);
         if let Some(Some(entry)) = self.entries.get(fd as usize) {
-            entry.read_ptr < entry.buffer.len()
+            match entry {
+                FDEntry::File { buffer, read_ptr, .. } => *read_ptr < buffer.len(),
+                FDEntry::Socket { .. } => false,
+            }
         } else {
             false
         }

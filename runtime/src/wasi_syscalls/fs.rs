@@ -578,7 +578,7 @@ pub fn wasi_path_open(
             eprintln!("path_open: No free FD available!");
             return 76;
         }
-        table.entries[fd as usize] = Some(FDEntry {
+        table.entries[fd as usize] = Some(FDEntry::File {
             buffer: file_data,
             read_ptr: 0,
             is_directory: is_dir,
@@ -625,24 +625,18 @@ pub fn wasi_fd_readdir(
     let (data_to_read, read_ptr_before) = {
         let process_data = caller.data();
         let mut table = process_data.fd_table.lock().unwrap();
-
-        let fd_entry = match table.get_fd_entry_mut(fd) {
-            Some(entry) => entry,
-            None => {
-                eprintln!("fd_readdir: invalid FD {}", fd);
-                return 8; // WASI_EBADF
+        match table.get_fd_entry_mut(fd) {
+            Some(FDEntry::File { buffer, read_ptr, .. }) => {
+                if *read_ptr >= buffer.len() {
+                    println!("fd_readdir: End of directory listing, returning 0 used bytes");
+                    (Vec::new(), *read_ptr)
+                } else {
+                    let slice = &buffer[*read_ptr..];
+                    let local_copy = slice.to_vec();
+                    (local_copy, *read_ptr)
+                }
             }
-        };
-
-        if fd_entry.read_ptr >= fd_entry.buffer.len() {
-            println!("fd_readdir: End of directory listing, returning 0 used bytes");
-            // We'll set bufused_out to 0. But do that after we drop the lock.
-            (Vec::new(), fd_entry.read_ptr)
-        } else {
-            let slice = &fd_entry.buffer[fd_entry.read_ptr..];
-            // Copy to local vec
-            let local_copy = slice.to_vec();
-            (local_copy, fd_entry.read_ptr)
+            _ => (Vec::new(), 0)
         }
     };
 
@@ -679,8 +673,8 @@ pub fn wasi_fd_readdir(
     {
         let process_data = caller.data();
         let mut table = process_data.fd_table.lock().unwrap();
-        if let Some(entry) = table.get_fd_entry_mut(fd) {
-            entry.read_ptr = read_ptr_before + n_to_copy;
+        if let Some(FDEntry::File { read_ptr, .. }) = table.get_fd_entry_mut(fd) {
+            *read_ptr = read_ptr_before + n_to_copy;
         }
     }
 
@@ -749,8 +743,8 @@ pub fn wasi_fd_write(
             let pd = caller.data();
             let table = pd.fd_table.lock().unwrap();
             match table.entries.get(fd as usize) {
-                Some(Some(entry)) if entry.host_path.is_some() && !entry.is_directory => {
-                    entry.host_path.clone()
+                Some(Some(FDEntry::File { host_path, is_directory, .. })) if host_path.is_some() && !is_directory => {
+                    host_path.clone()
                 }
                 _ => None,
             }
@@ -993,7 +987,7 @@ pub fn wasi_file_create(
                     error!("file_create: No free FD available!");
                     return 76;
                 }
-                table.entries[fd as usize] = Some(FDEntry {
+                table.entries[fd as usize] = Some(FDEntry::File {
                     buffer: Vec::new(),
                     read_ptr: 0,
                     is_directory: false,

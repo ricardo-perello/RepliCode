@@ -2,10 +2,11 @@ use std::io;
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::io::Write;
 use crate::commands::Command;
+use bincode;
 
 /// Write a binary record for a given command.
 /// New record layout:
-/// [ 1 byte msg_type ][ 8 bytes process_id ][ 2 bytes payload_length ][ payload ]
+/// [ 1 byte msg_type ][ 8 bytes process_id ][ 4 bytes payload_length ][ payload ]
 pub fn write_record(cmd: &Command) -> io::Result<Vec<u8>> {
     let (msg_type, pid, payload) = match cmd {
         Command::Clock(delta) => {
@@ -23,19 +24,22 @@ pub fn write_record(cmd: &Command) -> io::Result<Vec<u8>> {
             (2u8, u64::MAX, payload)
         },
         Command::FDMsg(pid, data) => (1u8, *pid, data.clone()),
-        Command::Ftp(pid, ftp_cmd) => {
-            // Type 4 for FTP operations; include the provided pid.
-            (4u8, *pid, ftp_cmd.as_bytes().to_vec())
-        },
+        Command::NetworkIn(pid, port, data) => (3u8, *pid, {
+            let mut payload = Vec::new();
+            payload.write_u16::<LittleEndian>(*port)?;
+            payload.extend(data);
+            payload
+        }),
+        Command::NetworkOut(pid, op) => (4u8, *pid, bincode::serialize(op).unwrap()),
     };
 
-    if payload.len() > (u16::MAX as usize) {
+    if payload.len() > (u32::MAX as usize) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "Payload too long"));
     }
-    let mut record = Vec::with_capacity(1 + 8 + 2 + payload.len());
+    let mut record = Vec::with_capacity(1 + 8 + 4 + payload.len());
     record.push(msg_type);
     record.write_u64::<LittleEndian>(pid)?;
-    record.write_u16::<LittleEndian>(payload.len() as u16)?;
+    record.write_u32::<LittleEndian>(payload.len() as u32)?;
     record.write_all(&payload)?;
     Ok(record)
 }

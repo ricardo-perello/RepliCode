@@ -7,21 +7,46 @@ use crate::{
     }, wasi_syscalls::fs::flush_write_buffer_for_scheduler,
 };
 use std::{collections::VecDeque, fs};
-use std::io::Read;
+use std::io::{Read, Write};
 use log::{debug, error, info};
 use std::thread;
 use std::time::Duration;
+use crate::wasi_syscalls::net::OutgoingNetworkMessage;
+
+struct BatchCollector {
+    outgoing_messages: Vec<OutgoingNetworkMessage>,
+    batch_start_time: u64,
+}
+
+impl BatchCollector {
+    fn new() -> Self {
+        BatchCollector {
+            outgoing_messages: Vec::new(),
+            batch_start_time: GlobalClock::now(),
+        }
+    }
+
+    fn collect_network_messages(&mut self, processes: &[Process]) {
+        for process in processes {
+            let mut queue = process.data.network_queue.lock().unwrap();
+            while let Some(msg) = queue.pop() {
+                self.outgoing_messages.push(msg);
+            }
+        }
+    }
+}
 
 /// A dynamic scheduler that runs indefinitely and uses a generic consensus function.
 /// The consensus function receives a mutable vector of processes (which may be new or blocked)
 /// and updates their state based on external input.
 pub fn run_scheduler_dynamic<F>(processes: Vec<Process>, mut consensus_input: F) -> Result<()>
 where
-    F: FnMut(&mut Vec<Process>) -> Result<bool>,
+    F: FnMut(&mut Vec<Process>, Vec<OutgoingNetworkMessage>) -> Result<bool>,
 {
     let mut ready_queue: VecDeque<Process> = processes.into();
     let mut blocked_queue: VecDeque<Process> = VecDeque::new();
     let mut has_more_input = true;
+    let mut batch_collector = BatchCollector::new();
 
     debug!(
         "Dynamic scheduler running on thread: {}",
@@ -84,7 +109,8 @@ where
             if blocked_queue.is_empty() {
                 debug!("No processes in queue; waiting for consensus input.");
                 let mut new_processes = Vec::new();
-                has_more_input = consensus_input(&mut new_processes)?;
+                batch_collector.collect_network_messages(&new_processes);
+                has_more_input = consensus_input(&mut new_processes, batch_collector.outgoing_messages.drain(..).collect())?;
                 ready_queue.extend(new_processes);
 
                 if ready_queue.is_empty() && !has_more_input {
@@ -100,7 +126,8 @@ where
             } else {
                 // Combine blocked processes and update their states.
                 let mut all_processes: Vec<Process> = blocked_queue.drain(..).collect();
-                has_more_input = consensus_input(&mut all_processes)?;
+                batch_collector.collect_network_messages(&all_processes);
+                has_more_input = consensus_input(&mut all_processes, batch_collector.outgoing_messages.drain(..).collect())?;
                 info!("All processes blocked; consensus input updated process states.");
 
                 // Re-split processes based on new state.
@@ -144,6 +171,7 @@ where
                                 }
                             }
                             Some(BlockReason::Timeout { resume_after }) => GlobalClock::now() >= resume_after,
+                            Some(BlockReason::NetworkIO) => true, //TODO Network operations are handled by consensus
                             _ => false,
                         }
                     };
@@ -185,17 +213,17 @@ where
 
 
 pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) -> Result<()> {
-    run_scheduler_dynamic(processes, |processes| {
+    run_scheduler_dynamic(processes, |processes, _| {
         // Use the existing process_consensus_file function.
         process_consensus_file(consensus_file, processes)
     })
 }
 
 // // /// Wrapper for interactive mode using a live consensus pipe/socket.
-pub fn run_scheduler_interactive<R: Read>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
-    run_scheduler_dynamic(processes, |processes| {
+pub fn run_scheduler_interactive<R: Read + Write>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
+    run_scheduler_dynamic(processes, |processes, outgoing_messages| {
         // Process pipe should keep running indefinitely
-        process_consensus_pipe(consensus_pipe, processes)?;
+        process_consensus_pipe(consensus_pipe, processes, outgoing_messages)?;
         Ok(true) // Always return true for pipe mode to keep scheduler running
     })
 }

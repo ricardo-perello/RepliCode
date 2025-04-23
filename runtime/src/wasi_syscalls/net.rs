@@ -1,5 +1,16 @@
 use wasmtime::Caller;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
+use std::sync::Arc;
+use std::sync::Mutex;
+use consensus::commands::NetworkOperation;
+use anyhow::Result;
+use log::{info, error};
+
+#[derive(Debug, Clone)]
+pub struct OutgoingNetworkMessage {
+    pub pid: u64,
+    pub operation: NetworkOperation,
+}
 
 //TODO dummy version, need to talk to gauthier to ensure how it goes through consensus
 
@@ -11,10 +22,48 @@ pub fn wasi_sock_open(
     protocol: i32,
     sock_fd_out: i32,
 ) -> i32 {
-    println!("Called sock_open with domain={}, socktype={}, protocol={}", domain, socktype, protocol);
+    let pid;
+    let src_port;
+    let fd;
+    
+    // First handle process data and network operations
+    {
+        let process_data = caller.data();
+        pid = process_data.id;
+        src_port = {
+            let mut port = process_data.next_port.lock().unwrap();
+            *port += 1;
+            *port
+        };
 
-    // Possibly block here if “no more sockets available” or if we want
-    // to simulate a blocking condition. For now, we do not block:
+        // Queue the connect operation
+        let op = NetworkOperation::Connect {
+            dest_addr: "127.127.127.127".to_string(), // TODO: Get from WASM memory
+            dest_port: 8000,                          // TODO: Get from WASM memory
+            src_port,
+        };
+        
+        process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
+            pid,
+            operation: op,
+        });
+    }
+    
+    // Block until consensus processes this
+    block_process_for_network(&mut caller);
+    
+    // Create FD entry for the socket
+    {
+        let process_data = caller.data();
+        let mut table = process_data.fd_table.lock().unwrap();
+        fd = table.allocate_fd();
+        table.entries[fd as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
+            local_port: src_port,
+            connected: false,
+        });
+    }
+    
+    // Write FD back to WASM memory
     let memory = match caller.get_export("memory") {
         Some(wasmtime::Extern::Memory(mem)) => mem,
         _ => {
@@ -22,30 +71,110 @@ pub fn wasi_sock_open(
             return 1;
         }
     };
-
-    // Allocate a new FD for this socket in our FD table:
-    let new_sock_fd = {
-        let process_data = caller.data();
-        let mut table = process_data.fd_table.lock().unwrap();
-        let fd = table.allocate_fd();
-        table.entries[fd as usize] = Some(crate::runtime::fd_table::FDEntry { //TODO should change for actual implementation
-            buffer: Vec::new(),
-            read_ptr: 0,
-            is_directory: false,
-            is_preopen: false,
-            host_path: None,
-        });
-        fd
-    };
-
-    // Write back the new FD:
     let mem_mut = memory.data_mut(&mut caller);
     let out_ptr = sock_fd_out as usize;
     if out_ptr + 4 > mem_mut.len() {
         eprintln!("sock_open: sock_fd_out pointer out of bounds");
         return 1;
     }
-    mem_mut[out_ptr..out_ptr+4].copy_from_slice(&(new_sock_fd as u32).to_le_bytes());
+    mem_mut[out_ptr..out_ptr+4].copy_from_slice(&(fd as u32).to_le_bytes());
+    0
+}
+
+pub fn wasi_sock_send(
+    mut caller: Caller<'_, ProcessData>,
+    fd: i32,
+    si_data: i32,
+    si_data_len: i32,
+    si_flags: i32,
+    ret_data_len: i32,
+) -> i32 {
+    let pid;
+    let src_port;
+    let data;
+    
+    // First get the memory data
+    {
+        let memory = match caller.get_export("memory") {
+            Some(wasmtime::Extern::Memory(mem)) => mem,
+            _ => return 1,
+        };
+        let mem = memory.data(&caller);
+        data = mem[si_data as usize..(si_data + si_data_len) as usize].to_vec();
+    }
+
+    // Then handle process data
+    {
+        let process_data = caller.data();
+        pid = process_data.id;
+        
+        // Get socket FD entry
+        src_port = {
+            let table = process_data.fd_table.lock().unwrap();
+            if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, .. })) = table.entries.get(fd as usize) {
+                *local_port
+            } else {
+                return 1; // Invalid FD
+            }
+        };
+        
+        // Queue the send operation
+        let op = NetworkOperation::Send {
+            src_port,
+            data: data.clone(),
+        };
+        
+        process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
+            pid,
+            operation: op,
+        });
+    }
+    
+    // Block until consensus processes this
+    block_process_for_network(&mut caller);
+
+    // Write the number of bytes sent back to memory
+    {
+        let memory = match caller.get_export("memory") {
+            Some(wasmtime::Extern::Memory(mem)) => mem,
+            _ => return 1,
+        };
+        let mem_mut = memory.data_mut(&mut caller);
+        let ret_data_len_bytes = (data.len() as u32).to_le_bytes();
+        mem_mut[ret_data_len as usize..(ret_data_len + 4) as usize].copy_from_slice(&ret_data_len_bytes);
+    }
+    0
+}
+
+pub fn wasi_sock_close(
+    mut caller: Caller<'_, ProcessData>,
+    fd: i32,
+) -> i32 {
+    let process_data = caller.data();
+    let pid = process_data.id;
+    
+    // Get socket FD entry
+    let src_port = {
+        let table = process_data.fd_table.lock().unwrap();
+        if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, .. })) = table.entries.get(fd as usize) {
+            *local_port
+        } else {
+            return 1; // Invalid FD
+        }
+    };
+    
+    // Queue the close operation
+    let op = NetworkOperation::Close {
+        src_port,
+    };
+    
+    process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
+        pid,
+        operation: op,
+    });
+    
+    // Block until consensus processes this
+    block_process_for_network(&mut caller);
     0
 }
 
@@ -69,6 +198,38 @@ pub fn wasi_sock_listen(
     0
 }
 
+pub fn wasi_sock_accept(
+    mut caller: Caller<ProcessData>,
+    fd: u32,
+    flags: u32,
+    fd_ptr: u32,
+) -> Result<u32> {
+    info!("wasi_sock_accept: fd={}, flags={}, fd_ptr={}", fd, flags, fd_ptr);
+    Ok(0)
+}
+
+pub fn wasi_sock_recv(
+    mut caller: Caller<ProcessData>,
+    fd: u32,
+    ri_data_ptr: u32,
+    ri_data_len: u32,
+    ri_flags: u32,
+    ro_datalen_ptr: u32,
+    ro_flags_ptr: u32,
+) -> Result<u32> {
+    info!("wasi_sock_recv: fd={}, ri_data_ptr={}, ri_data_len={}, ri_flags={}, ro_datalen_ptr={}, ro_flags_ptr={}", 
+        fd, ri_data_ptr, ri_data_len, ri_flags, ro_datalen_ptr, ro_flags_ptr);
+    Ok(0)
+}
+
+pub fn wasi_sock_shutdown(
+    mut caller: Caller<ProcessData>,
+    fd: u32,
+    how: u32,
+) -> Result<u32> {
+    info!("wasi_sock_shutdown: fd={}, how={}", fd, how);
+    Ok(0)
+}
 
 fn block_process_for_network(caller: &mut Caller<'_, ProcessData>) {
     {

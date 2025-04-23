@@ -1,5 +1,22 @@
 use std::io::Write;
 use log::error;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NetworkOperation {
+    Connect {
+        dest_addr: String,
+        dest_port: u16,
+        src_port: u16,
+    },
+    Send {
+        src_port: u16,
+        data: Vec<u8>,
+    },
+    Close {
+        src_port: u16,
+    }
+}
 
 /// High-level command variants.
 #[derive(Clone, Debug)]
@@ -7,7 +24,8 @@ pub enum Command {
     Clock(u64),
     Init(Vec<u8>, Option<String>),
     FDMsg(u64, Vec<u8>),
-    Ftp(u64, String), // New variant: includes a PID and FTP command string.
+    NetworkIn(u64, u16, Vec<u8>),  // pid, dest_port, data
+    NetworkOut(u64, NetworkOperation), // pid, operation
 }
 
 /// Reads a WASM file from disk.
@@ -61,16 +79,6 @@ pub fn parse_command(line: &str) -> Option<Command> {
             let pid = tokens[1].parse::<u64>().unwrap_or(0);
             let message = tokens[2..].join(" ");
             Some(Command::FDMsg(pid, message.into_bytes()))
-        },
-        "ftp" => {
-            // "ftp <pid> <ftp_command>"
-            if tokens.len() < 3 {
-                error!("Usage: ftp <pid> <ftp_command>");
-                return None;
-            }
-            let pid = tokens[1].parse::<u64>().unwrap_or(0);
-            let ftp_cmd = tokens[2..].join(" ");
-            Some(Command::Ftp(pid, ftp_cmd))
         },
         "clock" => {
             // "clock <nanoseconds>"

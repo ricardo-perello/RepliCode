@@ -4,6 +4,7 @@ use std::{
     fmt, fs::{self, create_dir_all}, panic::AssertUnwindSafe, path::{Path, PathBuf}, sync::{Arc, Condvar, Mutex}, thread
 };
 use wasmtime::{Engine, Module, Store, Linker};
+use crate::wasi_syscalls::net::OutgoingNetworkMessage;
 
 use crate::{
     runtime::fd_table::{FDEntry, FDTable},
@@ -57,6 +58,9 @@ pub struct ProcessData {
     pub current_disk_usage: Arc<Mutex<u64>>,
     pub write_buffer: Arc<Mutex<Vec<u8>>>,
     pub max_write_buffer: usize,
+    pub id: u64,
+    pub next_port: Arc<Mutex<u16>>,
+    pub network_queue: Arc<Mutex<Vec<OutgoingNetworkMessage>>>,
 }
 
 pub struct Process {
@@ -145,6 +149,9 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
         current_disk_usage: Arc::new(Mutex::new(preload_size)),
         write_buffer: Arc::new(Mutex::new(Vec::new())),
         max_write_buffer: 1024,
+        id,
+        next_port: Arc::new(Mutex::new(0)),
+        network_queue: Arc::new(Mutex::new(Vec::new())),
     };
 
     let thread_data = process_data.clone();
@@ -234,7 +241,7 @@ pub fn start_process(
     {
         let mut table = fd_table.lock().unwrap();
         // Reserve FD=0 for stdin
-        table.entries[0] = Some(FDEntry {
+        table.entries[0] = Some(FDEntry::File {
             buffer: Vec::new(),
             read_ptr: 0,
             is_directory: false,
@@ -256,7 +263,7 @@ pub fn start_process(
     // Preopen FD=3 => the root directory
     {
         let mut table = fd_table.lock().unwrap();
-        table.entries[3] = Some(FDEntry {
+        table.entries[3] = Some(FDEntry::File {
             buffer: Vec::new(),
             read_ptr: 0,
             is_directory: true,
@@ -275,6 +282,9 @@ pub fn start_process(
         current_disk_usage: Arc::new(Mutex::new(0)),
         write_buffer: Arc::new(Mutex::new(Vec::new())),
         max_write_buffer: 1024,
+        id,
+        next_port: Arc::new(Mutex::new(0)),
+        network_queue: Arc::new(Mutex::new(Vec::new())),
     };
 
     let process_data_clone = process_data.clone();
