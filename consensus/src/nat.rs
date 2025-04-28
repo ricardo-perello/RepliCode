@@ -41,8 +41,14 @@ impl NatTable {
                 let consensus_port = self.allocate_port();
                 let addr = format!("{}:{}", dest_addr, dest_port);
                 
+                debug!("Attempting to connect to {}", addr);
                 match TcpStream::connect(&addr) {
                     Ok(stream) => {
+                        // Set to non-blocking mode
+                        if let Err(e) = stream.set_nonblocking(true) {
+                            error!("Failed to set non-blocking mode: {}", e);
+                        }
+                        
                         let entry = NatEntry {
                             process_id: pid,
                             process_port: src_port,
@@ -62,14 +68,31 @@ impl NatTable {
                 }
             }
             NetworkOperation::Send { src_port, data } => {
-                debug!("Processing send operation for process {}:{} ({} bytes)", pid, src_port, data.len());
+                info!("Processing send operation for process {}:{} ({} bytes): {:?}", 
+                     pid, src_port, data.len(), String::from_utf8_lossy(&data));
+                
+                // Check if we have a mapping for this process:port
                 if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
+                    debug!("Found NAT mapping: process {}:{} -> consensus:{}", pid, src_port, consensus_port);
+                    
                     if let Some(entry) = self.port_mappings.get_mut(&consensus_port) {
-                        if let Err(e) = entry.connection.write_all(&data) {
-                            error!("Failed to send data to {}:{}: {}", pid, src_port, e);
-                            return Err(Box::new(e));
+                        debug!("Found port mapping entry, attempting to write {} bytes", data.len());
+                        match entry.connection.write_all(&data) {
+                            Ok(_) => {
+                                // Explicitly flush the connection
+                                if let Err(e) = entry.connection.flush() {
+                                    error!("Failed to flush data to connection: {}", e);
+                                    return Err(Box::new(e));
+                                }
+                                info!("Successfully sent and flushed {} bytes to destination", data.len());
+                            }
+                            Err(e) => {
+                                error!("Failed to send data to destination: {}", e);
+                                return Err(Box::new(e));
+                            }
                         }
-                        info!("Sent {} bytes to {}:{}", data.len(), pid, src_port);
+                    } else {
+                        error!("Inconsistent state: consensus port {} found but no mapping entry exists", consensus_port);
                     }
                 } else {
                     error!("No NAT mapping found for process {}:{}", pid, src_port);
@@ -90,19 +113,21 @@ impl NatTable {
     }
 
     pub fn check_for_incoming_data(&mut self) -> Vec<(u64, u16, Vec<u8>)> {
-        //debug!("Checking for incoming data on all NAT connections");
+        //debug!("Checking for incoming data on all NAT connections (total connections: {})", self.port_mappings.len());
         let mut messages = Vec::new();
         let mut to_remove = Vec::new();
 
         for (consensus_port, entry) in &mut self.port_mappings {
             let mut buf = [0u8; 1024];
+            //debug!("Checking for data on NAT port {}", consensus_port);
             match entry.connection.read(&mut buf) {
                 Ok(0) => {
-                    debug!("Connection closed by remote for {}:{}", entry.process_id, entry.process_port);
+                    info!("Connection closed by remote for {}:{}", entry.process_id, entry.process_port);
                     to_remove.push(*consensus_port);
                 }
                 Ok(n) => {
-                    debug!("Received {} bytes from {}:{}", n, entry.process_id, entry.process_port);
+                    info!("Received {} bytes from connection for process {}:{}: {:?}", 
+                         n, entry.process_id, entry.process_port, String::from_utf8_lossy(&buf[..n]));
                     messages.push((
                         entry.process_id,
                         entry.process_port,
@@ -111,6 +136,7 @@ impl NatTable {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // No data available
+                    //debug!("No data available on NAT port {}", consensus_port);
                     continue;
                 }
                 Err(e) => {

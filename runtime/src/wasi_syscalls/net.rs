@@ -24,11 +24,23 @@ pub fn wasi_sock_open(
 ) -> i32 {
     debug!("wasi_sock_open called with domain={}, socktype={}, protocol={}, sock_fd_out={}", 
         domain, socktype, protocol, sock_fd_out);
+    
+    // Validate parameters
+    if domain != 1 && domain != 2 { // AF_INET (1) or AF_INET6 (2)
+        error!("wasi_sock_open: invalid domain {}", domain);
+        return 1; // EINVAL
+    }
+    
+    if socktype != 1 && socktype != 2 { // SOCK_STREAM (1) or SOCK_DGRAM (2)
+        error!("wasi_sock_open: invalid socktype {}", socktype);
+        return 1; // EINVAL
+    }
+    
     let pid;
     let src_port;
     let fd;
     
-    // First handle process data and network operations
+    // First handle process data and socket creation
     {
         let process_data = caller.data();
         pid = process_data.id;
@@ -39,29 +51,13 @@ pub fn wasi_sock_open(
         };
         debug!("Allocated port {} for process {}", src_port, pid);
 
-        // Queue the connect operation
-        let op = NetworkOperation::Connect {
-            dest_addr: "127.0.0.1".to_string(), // TODO: Get from WASM memory
-            dest_port: 8000,                          // TODO: Get from WASM memory
-            src_port,
-        };
-        
-        process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
-            pid,
-            operation: op,
-        });
-        info!("Queued connect operation for process {}:{}", pid, src_port);
-    }
-    
-    // Block until consensus processes this
-    debug!("Blocking process {} for network operation", pid);
-    block_process_for_network(&mut caller);
-    
-    // Create FD entry for the socket
-    {
-        let process_data = caller.data();
+        // Create FD entry for the socket
         let mut table = process_data.fd_table.lock().unwrap();
         fd = table.allocate_fd();
+        if fd < 0 {
+            error!("wasi_sock_open: no free file descriptors available");
+            return 76; // EMFILE
+        }
         table.entries[fd as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
             local_port: src_port,
             connected: false,
@@ -74,18 +70,18 @@ pub fn wasi_sock_open(
         Some(wasmtime::Extern::Memory(mem)) => mem,
         _ => {
             error!("sock_open: no memory export found");
-            return 1;
+            return 1; // EINVAL
         }
     };
     let mem_mut = memory.data_mut(&mut caller);
     let out_ptr = sock_fd_out as usize;
     if out_ptr + 4 > mem_mut.len() {
         error!("sock_open: sock_fd_out pointer out of bounds");
-        return 1;
+        return 1; // EINVAL
     }
     mem_mut[out_ptr..out_ptr+4].copy_from_slice(&(fd as u32).to_le_bytes());
     debug!("Wrote socket FD {} to memory at offset {}", fd, out_ptr);
-    0
+    0 // Success
 }
 
 pub fn wasi_sock_send(
@@ -253,6 +249,93 @@ pub fn wasi_sock_shutdown(
 ) -> Result<u32> {
     info!("wasi_sock_shutdown: fd={}, how={}", fd, how);
     Ok(0)
+}
+
+pub fn wasi_sock_connect(
+    mut caller: Caller<'_, ProcessData>,
+    fd: i32,
+    addr: i32,
+    addr_len: i32,
+) -> i32 {
+    debug!("wasi_sock_connect called with fd={}, addr={}, addr_len={}", 
+        fd, addr, addr_len);
+    
+    let pid;
+    let src_port;
+    let dest_addr;
+    let dest_port;
+    
+    // First get the memory data for address
+    {
+        let memory = match caller.get_export("memory") {
+            Some(wasmtime::Extern::Memory(mem)) => mem,
+            _ => {
+                error!("sock_connect: no memory export found");
+                return 1; // EINVAL
+            }
+        };
+        let mem = memory.data(&caller);
+        if addr as usize + addr_len as usize > mem.len() {
+            error!("sock_connect: address out of bounds");
+            return 1; // EINVAL
+        }
+        
+        // Parse sockaddr_in structure (assuming IPv4 for now)
+        // struct sockaddr_in {
+        //     sa_family_t sin_family;  // 2 bytes
+        //     in_port_t sin_port;      // 2 bytes
+        //     struct in_addr sin_addr; // 4 bytes
+        //     char sin_zero[8];        // 8 bytes
+        // }
+        let addr_bytes = &mem[addr as usize..(addr + addr_len) as usize];
+        if addr_bytes.len() < 16 {
+            error!("sock_connect: address too short");
+            return 1; // EINVAL
+        }
+        
+        // Parse port (network byte order)
+        let port_bytes: [u8; 2] = [addr_bytes[2], addr_bytes[3]];
+        dest_port = u16::from_be_bytes(port_bytes);
+        
+        // Parse address (network byte order)
+        let addr_bytes: [u8; 4] = [addr_bytes[4], addr_bytes[5], addr_bytes[6], addr_bytes[7]];
+        dest_addr = format!("{}.{}.{}.{}", addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]);
+    }
+
+    // Then handle process data
+    {
+        let process_data = caller.data();
+        pid = process_data.id;
+        
+        // Get socket FD entry
+        src_port = {
+            let table = process_data.fd_table.lock().unwrap();
+            if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, .. })) = table.entries.get(fd as usize) {
+                *local_port
+            } else {
+                error!("Invalid socket FD {} for process {}", fd, pid);
+                return 1; // EINVAL
+            }
+        };
+        
+        // Queue the connect operation
+        let op = NetworkOperation::Connect {
+            dest_addr: dest_addr.clone(),
+            dest_port,
+            src_port,
+        };
+        
+        process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
+            pid,
+            operation: op,
+        });
+        info!("Queued connect operation for process {}:{} -> {}:{}", pid, src_port, dest_addr, dest_port);
+    }
+    
+    // Block until consensus processes this
+    debug!("Blocking process {} for network operation", pid);
+    block_process_for_network(&mut caller);
+    0 // Success
 }
 
 fn block_process_for_network(caller: &mut Caller<'_, ProcessData>) {

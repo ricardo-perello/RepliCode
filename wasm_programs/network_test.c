@@ -1,10 +1,15 @@
 #include <stdio.h>
 #include <string.h>
+#include <netinet/in.h>
 
 // WASI socket functions
 __attribute__((import_module("wasi_snapshot_preview1")))
 __attribute__((import_name("sock_open")))
 int sock_open(int domain, int socktype, int protocol, int* sock_fd_out);
+
+__attribute__((import_module("wasi_snapshot_preview1")))
+__attribute__((import_name("sock_connect")))
+int sock_connect(int sock_fd, const struct sockaddr* addr, int addr_len);
 
 __attribute__((import_module("wasi_snapshot_preview1")))
 __attribute__((import_name("sock_send")))
@@ -27,14 +32,24 @@ int main() {
     }
     printf("Socket opened with fd: %d\n", sock_fd);
 
-    // Send a test message using iovec
+    // Set up destination address (example: localhost:8080)
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(8000);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // 127.0.0.1
+
+    // Connect to the destination
+    ret = sock_connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr));
+    if (ret != 0) {
+        printf("Failed to connect socket\n");
+        return 1;
+    }
+    printf("Socket connected successfully\n");
+
+    // Send a test message
     const char* message = "Hello from WASM!";
-    struct iovec iov = {
-        .iov_base = (void*)message,
-        .iov_len = strlen(message)
-    };
-    
-    ret = sock_send(sock_fd, &iov, 1, 0, &bytes_sent);
+    ret = sock_send(sock_fd, message, strlen(message), 0, &bytes_sent);
     if (ret != 0) {
         printf("Failed to send message\n");
         return 1;

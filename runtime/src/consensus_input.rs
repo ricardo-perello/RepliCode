@@ -159,26 +159,64 @@ pub fn process_consensus_pipe<R: Read + Write>(
             },
             3 => { // NetworkIn
                 debug!("Processing NetworkIn for process {}", process_id);
-                let dest_port = reader.read_u16::<LittleEndian>()?;
-                let payload_len = reader.read_u32::<LittleEndian>()? as usize;
-                let mut payload = vec![0u8; payload_len];
-                reader.read_exact(&mut payload)?;
-
+                // The payload already contains the port + data
+                // First 2 bytes are the destination port
+                if payload.len() < 2 {
+                    error!("NetworkIn payload too short for process {}", process_id);
+                    continue;
+                }
+                
+                let dest_port = ((payload[0] as u16) | ((payload[1] as u16) << 8));
+                let data = &payload[2..];
+                
+                debug!("Received {} bytes from network for process {} port {}", data.len(), process_id, dest_port);
+                
+                let mut found = false;
                 for process in processes.iter_mut() {
                     if process.id == process_id {
-                        let mut table = process.data.fd_table.lock().unwrap();
-                        if let Some(Some(FDEntry::Socket { .. })) = table.entries.get_mut(0) {
-                            // TODO: Find the correct socket FD based on port
-                            // For now, just use FD 0
-                            if let Some(Some(FDEntry::File { buffer, .. })) = table.entries.get_mut(0) {
-                                buffer.extend_from_slice(&payload);
-                                buffer.push(b'\n');
-                                info!("Added NetworkIn data to process {}'s FD 0 ({} bytes)", process_id, payload.len());
+                        found = true;
+                        // Find socket with matching port
+                        let mut matching_fd = None;
+                        {
+                            let table = process.data.fd_table.lock().unwrap();
+                            for (fd, entry) in table.entries.iter().enumerate() {
+                                if let Some(FDEntry::Socket { local_port, .. }) = entry {
+                                    if *local_port == dest_port {
+                                        matching_fd = Some(fd);
+                                        break;
+                                    }
+                                }
                             }
                         }
+                        
+                        // If we found a matching socket, update it with the data
+                        if let Some(fd) = matching_fd {
+                            let mut table = process.data.fd_table.lock().unwrap();
+                            if fd < table.entries.len() {
+                                let buffer_entry = table.entries.get_mut(fd).unwrap();
+                                if let Some(FDEntry::Socket { .. }) = buffer_entry {
+                                    // Create a temporary file buffer for this fd to store the data
+                                    *buffer_entry = Some(FDEntry::File {
+                                        host_path: None,
+                                        buffer: data.to_vec(),
+                                        read_ptr: 0,
+                                        is_directory: false,
+                                        is_preopen: false,
+                                    });
+                                    info!("Added NetworkIn data to process {}'s FD {} ({} bytes)", 
+                                         process_id, fd, data.len());
+                                }
+                            }
+                        }
+                        
+                        // Notify waiting process
                         process.data.cond.notify_all();
                         break;
                     }
+                }
+                
+                if !found {
+                    error!("No process found with ID {} for NetworkIn", process_id);
                 }
             },
             _ => {

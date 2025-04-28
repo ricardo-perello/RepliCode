@@ -73,6 +73,7 @@ pub fn register(linker: &mut Linker<ProcessData>) -> Result<()> {
 
     // Socket Operations
     linker.func_wrap("wasi_snapshot_preview1", "sock_open", net::wasi_sock_open)?;
+    linker.func_wrap("wasi_snapshot_preview1", "sock_connect", net::wasi_sock_connect)?;
     linker.func_wrap("wasi_snapshot_preview1", "sock_listen", net::wasi_sock_listen)?;
     linker.func_wrap("wasi_snapshot_preview1", "sock_accept", net::wasi_sock_accept)?;
     linker.func_wrap("wasi_snapshot_preview1", "sock_recv", net::wasi_sock_recv)?;

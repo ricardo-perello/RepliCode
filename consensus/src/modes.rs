@@ -127,20 +127,25 @@ pub fn run_tcp_mode() -> io::Result<()> {
         loop {
             thread::sleep(flush_interval);
             let mut buf = flush_buffer.lock().unwrap();
-            if !buf.is_empty() {
-                debug!("Flushing batch of {} bytes to runtime", buf.len());
-                // Create and append a clock command (10 seconds = 10_000_000_000 nanoseconds)
-                if let Ok(clock_record) = write_record(&Command::Clock(10_000_000_000)) {
-                    debug!("Appending clock record to batch");
-                    buf.extend(clock_record);
-                }
+            
+            // Create a clock command (10 seconds = 10_000_000_000 nanoseconds)
+            if let Ok(clock_record) = write_record(&Command::Clock(10_000_000_000)) {
+                let original_size = buf.len();
+                debug!("Appending clock record to batch");
+                buf.extend(clock_record.clone());
                 
                 if let Err(e) = flush_stream.write_all(&buf) {
                     error!("Error writing to runtime: {}", e);
                 } else {
-                    info!("Flushed {} bytes to runtime and clock record.", buf.len());
+                    if original_size > 0 {
+                        info!("Flushed {} bytes to runtime and clock record.", buf.len());
+                    } else {
+                        debug!("Sent clock update to runtime");
+                    }
                 }
                 buf.clear();
+            } else {
+                error!("Failed to create clock record");
             }
         }
     });
