@@ -4,11 +4,11 @@ use std::io::{Write, Read};
 use log::{info, error, debug};
 use crate::commands::NetworkOperation;
 
-struct NatEntry {
-    process_id: u64,
-    process_port: u16,
-    consensus_port: u16,
-    connection: TcpStream,
+pub struct NatEntry {
+    pub process_id: u64,
+    pub process_port: u16,
+    pub consensus_port: u16,
+    pub connection: TcpStream,
 }
 
 pub struct NatTable {
@@ -90,7 +90,7 @@ impl NatTable {
     }
 
     pub fn check_for_incoming_data(&mut self) -> Vec<(u64, u16, Vec<u8>)> {
-        debug!("Checking for incoming data on all NAT connections");
+        //debug!("Checking for incoming data on all NAT connections");
         let mut messages = Vec::new();
         let mut to_remove = Vec::new();
 

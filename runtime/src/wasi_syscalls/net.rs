@@ -41,7 +41,7 @@ pub fn wasi_sock_open(
 
         // Queue the connect operation
         let op = NetworkOperation::Connect {
-            dest_addr: "127.127.127.127".to_string(), // TODO: Get from WASM memory
+            dest_addr: "127.0.0.1".to_string(), // TODO: Get from WASM memory
             dest_port: 8000,                          // TODO: Get from WASM memory
             src_port,
         };

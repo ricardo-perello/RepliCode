@@ -1,15 +1,18 @@
-use std::io::{self, Write}; //, Read, BufReader};
+use std::io::{self, Write, Read, BufReader, BufWriter};
 use std::fs::OpenOptions;
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use log::{error, info};
+use log::{error, info, debug};
+use byteorder::{LittleEndian, ReadBytesExt};
+use bincode;
 
 // use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
 use crate::record::write_record;
-use crate::commands::{parse_command, Command};
+use crate::commands::{parse_command, Command, NetworkOperation};
+use crate::nat::NatTable;
 
 pub fn run_benchmark_mode() -> io::Result<()> {
     let file_path = "consensus/consensus_input.bin";
@@ -109,11 +112,14 @@ pub fn run_tcp_mode() -> io::Result<()> {
     info!("TCP mode: Accepted connection from runtime at {}", addr);
 
     // Shared buffer for accumulating messages.
-    let shared_buffer = Arc::new(Mutex::new(Vec::new()));
+    let shared_buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Clone the shared buffer and stream for the flush thread.
-    let flush_buffer = Arc::clone(&shared_buffer);
+    let flush_buffer: Arc<Mutex<Vec<u8>>> = Arc::clone(&shared_buffer);
     let mut flush_stream = runtime_stream.try_clone()?;
+
+    // Create NAT table for handling network operations
+    let nat_table: Arc<Mutex<NatTable>> = Arc::new(Mutex::new(NatTable::new()));
 
     // Set the flush interval (e.g., every 10 seconds).
     let flush_interval = Duration::from_secs(10);
@@ -122,8 +128,10 @@ pub fn run_tcp_mode() -> io::Result<()> {
             thread::sleep(flush_interval);
             let mut buf = flush_buffer.lock().unwrap();
             if !buf.is_empty() {
+                debug!("Flushing batch of {} bytes to runtime", buf.len());
                 // Create and append a clock command (10 seconds = 10_000_000_000 nanoseconds)
                 if let Ok(clock_record) = write_record(&Command::Clock(10_000_000_000)) {
+                    debug!("Appending clock record to batch");
                     buf.extend(clock_record);
                 }
                 
@@ -137,9 +145,82 @@ pub fn run_tcp_mode() -> io::Result<()> {
         }
     });
 
+    // Add a thread to read from runtime and handle network operations
+    let mut runtime_reader = runtime_stream.try_clone()?;
+    let nat_table_clone: Arc<Mutex<NatTable>> = Arc::clone(&nat_table);
+    thread::spawn(move || {
+        let mut reader = BufReader::new(runtime_reader);
+        loop {
+            // Read message type (1 byte)
+            let mut msg_type_buf = [0u8; 1];
+            if reader.read_exact(&mut msg_type_buf).is_err() {
+                error!("Lost connection to runtime");
+                break;
+            }
+            
+            // If it's a NetworkOut message (type 5)
+            if msg_type_buf[0] == 5 {
+                // Read process ID (8 bytes)
+                let mut pid_buf = [0u8; 8];
+                if reader.read_exact(&mut pid_buf).is_err() {
+                    error!("Failed to read process ID from runtime");
+                    break;
+                }
+                let pid = u64::from_le_bytes(pid_buf);
+                
+                // Read payload length (4 bytes)
+                let mut len_buf = [0u8; 4];
+                if reader.read_exact(&mut len_buf).is_err() {
+                    error!("Failed to read payload length from runtime");
+                    break;
+                }
+                let payload_len = u32::from_le_bytes(len_buf) as usize;
+                
+                // Read payload
+                let mut payload = vec![0u8; payload_len];
+                if reader.read_exact(&mut payload).is_err() {
+                    error!("Failed to read payload from runtime");
+                    break;
+                }
+                
+                // Deserialize network operation
+                match bincode::deserialize::<NetworkOperation>(&payload) {
+                    Ok(op) => {
+                        debug!("Received network operation from runtime for process {}: {:?}", pid, op);
+                        if let Err(e) = nat_table_clone.lock().unwrap().handle_network_operation(pid, op) {
+                            error!("Failed to handle network operation: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to deserialize network operation: {}", e);
+                    }
+                }
+            }
+        }
+    });
+
+    // Add a thread to check for incoming data on NAT connections
+    let nat_table_clone: Arc<Mutex<NatTable>> = Arc::clone(&nat_table);
+    let shared_buffer_clone: Arc<Mutex<Vec<u8>>> = Arc::clone(&shared_buffer);
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_millis(100)); // Check every 100ms
+            let messages = nat_table_clone.lock().unwrap().check_for_incoming_data();
+            if !messages.is_empty() {
+                let mut buf = shared_buffer_clone.lock().unwrap();
+                for (pid, port, data) in messages {
+                    debug!("Received {} bytes from network for process {} port {}", data.len(), pid, port);
+                    if let Ok(record) = write_record(&Command::NetworkIn(pid, port, data)) {
+                        buf.extend(record);
+                    }
+                }
+            }
+        }
+    });
+
     // Main loop: read commands from stdin.
     loop {
-        eprint!("Command (init <wasm_file> | msg <pid> <message> | ftp <pid> <ftp_command>): ");
+        eprint!("Command (init <wasm_file> | msg <pid> <message>): ");
         io::stderr().flush()?;
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
@@ -148,11 +229,14 @@ pub fn run_tcp_mode() -> io::Result<()> {
             break;
         }
         if let Some(cmd) = parse_command(input) {
+            //debug!("Received command: {:?}", cmd);
             match write_record(&cmd) {
                 Ok(record) => {
+                    debug!("Encoded command into {} bytes", record.len());
                     // Add the record to the shared batch.
                     let mut buf = shared_buffer.lock().unwrap();
                     buf.extend(record);
+                    debug!("Added record to batch, new batch size: {} bytes", buf.len());
                 }
                 Err(e) => {
                     error!("Error encoding command: {}", e);

@@ -1,6 +1,8 @@
 mod commands;
 mod record;
 mod modes;
+mod nat;
+mod test_server;
 
 use std::env;
 use std::io;
@@ -15,6 +17,7 @@ fn main() -> io::Result<()> {
     eprintln!("Benchmark mode: records are written immediately to a binary file.");
     eprintln!("Hybrid mode: reads an existing binary file and sends batches over TCP (after a clock record is reached).");
     eprintln!("TCP mode: enter commands interactively; every 10 seconds a batch is sent over TCP with an automatic clock record appended.");
+    eprintln!("Test server: starts a local echo server on 127.0.0.1:8000 for testing network connections.");
     eprintln!("Type 'exit' to quit.\n");
     
     
@@ -33,8 +36,9 @@ fn main() -> io::Result<()> {
         //     modes::run_hybrid_mode(input_file_path)
         // },
         "tcp" => modes::run_tcp_mode(),
+        "test-server" => test_server::start_test_server(),
         _ => {
-            error!("Unknown mode: {}. Use benchmark, hybrid, or tcp.", mode);
+            error!("Unknown mode: {}. Use benchmark, hybrid, tcp, or test-server.", mode);
             std::process::exit(1);
         } 
     }

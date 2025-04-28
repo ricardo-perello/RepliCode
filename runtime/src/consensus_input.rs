@@ -77,33 +77,19 @@ pub fn process_consensus_pipe<R: Read + Write>(
             Err(_) => break,
         };
 
+        debug!("Reading payload of {} bytes for process {}", payload_len, process_id);
+
         // Read the payload.
         let mut payload = vec![0u8; payload_len];
         if let Err(e) = reader.read_exact(&mut payload) {
             error!("Failed to read message from pipe: {}", e);
             break;
         }
-        let msg_str = match msg_type {
-            0 | 1 | 4 => { // Clock, FD, and FTP messages are text
-                match String::from_utf8(payload.clone()) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!("Failed to decode pipe message as UTF-8: {}", e);
-                        continue;
-                    }
-                }
-            },
-            2 => { // Init command - payload is binary WASM
-                String::new() // We don't need the string for WASM binary
-            },
-            _ => {
-                error!("Unknown message type: {}", msg_type);
-                continue;
-            }
-        };
 
         match msg_type {
             0 => { // Clock update.
+                let msg_str = String::from_utf8_lossy(&payload);
+                debug!("Processing clock update: {}", msg_str);
                 if let Some(delta_str) = msg_str.strip_prefix("clock:") {
                     match delta_str.trim().parse::<u64>() {
                         Ok(delta) => {
@@ -117,24 +103,24 @@ pub fn process_consensus_pipe<R: Read + Write>(
                 }
                 break; // End of batch.
             },
-            1 => { // FDMsg update.
-                debug!("Processing FDMsg update for process {}: {} bytes", process_id, payload.len());
+            1 => { // FD update.
                 let msg_str = String::from_utf8_lossy(&payload);
+                debug!("Processing FD update for process {}: {}", process_id, msg_str);
                 let parts: Vec<&str> = msg_str.split(",body:").collect();
                 if parts.len() != 2 {
-                    error!("Invalid FDMsg format for process {}: {}", process_id, msg_str);
+                    error!("Invalid FD update format for process {}: {}", process_id, msg_str);
                     continue;
                 }
                 let fd: i32 = if let Some(fd_part) = parts[0].strip_prefix("fd:") {
                     match fd_part.trim().parse() {
                         Ok(num) => num,
                         Err(_) => {
-                            error!("Invalid FD in FDMsg for process {}: {}", process_id, msg_str);
+                            error!("Invalid FD in FD update for process {}: {}", process_id, msg_str);
                             continue;
                         }
                     }
                 } else {
-                    error!("Missing FD prefix in FDMsg for process {}: {}", process_id, msg_str);
+                    error!("Missing FD prefix in FD update for process {}: {}", process_id, msg_str);
                     continue;
                 };
                 let body = parts[1].trim();
@@ -146,20 +132,20 @@ pub fn process_consensus_pipe<R: Read + Write>(
                         if let Some(Some(FDEntry::File { buffer, .. })) = table.entries.get_mut(fd as usize) {
                             buffer.extend_from_slice(body.as_bytes());
                             buffer.push(b'\n');
-                            info!("Added FDMsg to process {}'s FD {} ({} bytes)", process_id, fd, body.len());
+                            info!("Added FD update to process {}'s FD {} ({} bytes)", process_id, fd, body.len());
                         } else {
-                            error!("Process {} does not have FD {} open for FDMsg", process_id, fd);
+                            error!("Process {} does not have FD {} open for FD update", process_id, fd);
                         }
                         process.data.cond.notify_all();
                         break;
                     }
                 }
                 if !found {
-                    error!("No process found with ID {} for FDMsg", process_id);
+                    error!("No process found with ID {} for FD update", process_id);
                 }
             },
             2 => { // Init command.
-                info!("Received init command from consensus");
+                debug!("Processing init command for new process");
                 let new_pid = get_next_pid();
                 match process::start_process_from_bytes(payload, new_pid) {
                     Ok(proc) => {
@@ -194,11 +180,6 @@ pub fn process_consensus_pipe<R: Read + Write>(
                         break;
                     }
                 }
-            },
-            4 => { // NetworkOut
-                debug!("Processing NetworkOut for process {}", process_id);
-                // NetworkOut messages are handled in the outgoing_messages parameter
-                // No need to process them here as they are already handled
             },
             _ => {
                 error!("Unknown message type: {} in message", msg_type);
