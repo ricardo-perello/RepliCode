@@ -59,7 +59,6 @@ fn usage_add(caller: &mut Caller<'_, ProcessData>, bytes: u64) -> Result<(), i32
     if over_limit {
         eprintln!("Exceeded disk quota! Killing process...");
         kill_process(caller);
-        // kill_process(...) never returns, because it panics
     }
 
     Ok(())
@@ -98,7 +97,7 @@ fn kill_process(caller: &mut Caller<'_, ProcessData>) -> () {
     let pd = caller.data();
     pd.cond.notify_all();
     // Just exit with status code 1
-    std::process::exit(1); //TODO use wasi exit
+    panic!("WASM process aborted by runtime (quota or sandbox violation)"); //TODO check with gauthier
 }
 
 // ----------------------------------------------------------------------------
@@ -373,7 +372,7 @@ pub fn wasi_path_symlink(
     _new_path_ptr: i32,
     _new_path_len: i32,
 ) -> i32 {
-    error!("path_symlink: not yet implemented");
+    eprintln!("path_symlink: not yet implemented");
     kill_process(&mut caller);
     1
 }
