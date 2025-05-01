@@ -15,6 +15,12 @@ pub enum NetworkOperation {
     },
     Close {
         src_port: u16,
+    },
+    Listen {
+        src_port: u16,
+    },
+    Accept {
+        src_port: u16,
     }
 }
 

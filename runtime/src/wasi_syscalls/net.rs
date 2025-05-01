@@ -198,34 +198,107 @@ pub fn wasi_sock_close(
     0
 }
 
-/// Example stub for socket listen: 'wasi_sock_listen'
-/// This is also not official WASI but helps illustrate how you can block.
 pub fn wasi_sock_listen(
     mut caller: Caller<'_, ProcessData>,
     fd: i32,
     backlog: i32,
 ) -> i32 {
-    println!("Called sock_listen on fd={}, backlog={}", fd, backlog);
-    // If we want to block (e.g. we cannot listen yet?), do so:
-    let can_listen_now = true; // pretend we can listen
-    if !can_listen_now {
-        block_process_for_network(&mut caller);
-        return 0;
+    debug!("wasi_sock_listen called with fd={}, backlog={}", fd, backlog);
+    let pid;
+    let src_port;
+    
+    // Get socket FD entry
+    {
+        let process_data = caller.data();
+        pid = process_data.id;
+        let table = process_data.fd_table.lock().unwrap();
+        if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, .. })) = table.entries.get(fd as usize) {
+            src_port = *local_port;
+        } else {
+            error!("Invalid socket FD {} for process {}", fd, pid);
+            return 1; // Invalid FD
+        }
     }
-
-    // Otherwise, just print success.
-    println!("Socket is now listening!");
-    0
+    
+    // Queue the listen operation
+    {
+        let process_data = caller.data();
+        let op = NetworkOperation::Listen {
+            src_port,
+        };
+        
+        process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
+            pid,
+            operation: op,
+        });
+        info!("Queued listen operation for process {}:{}", pid, src_port);
+    }
+    
+    // Block until consensus processes this
+    debug!("Blocking process {} for network operation", pid);
+    block_process_for_network(&mut caller);
+    0 // Success
 }
 
 pub fn wasi_sock_accept(
-    mut caller: Caller<ProcessData>,
-    fd: u32,
-    flags: u32,
-    fd_ptr: u32,
-) -> Result<u32> {
-    info!("wasi_sock_accept: fd={}, flags={}, fd_ptr={}", fd, flags, fd_ptr);
-    Ok(0)
+    mut caller: Caller<'_, ProcessData>,
+    fd: i32,
+    flags: i32,
+    fd_out: i32,
+) -> i32 {
+    debug!("wasi_sock_accept called with fd={}, flags={}, fd_out={}", fd, flags, fd_out);
+    let pid;
+    let src_port;
+    
+    // Get socket FD entry
+    {
+        let process_data = caller.data();
+        pid = process_data.id;
+        let table = process_data.fd_table.lock().unwrap();
+        if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, .. })) = table.entries.get(fd as usize) {
+            src_port = *local_port;
+        } else {
+            error!("Invalid socket FD {} for process {}", fd, pid);
+            return 1; // Invalid FD
+        }
+    }
+    
+    // Queue the accept operation
+    {
+        let process_data = caller.data();
+        let op = NetworkOperation::Accept {
+            src_port,
+        };
+        
+        process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
+            pid,
+            operation: op,
+        });
+        info!("Queued accept operation for process {}:{}", pid, src_port);
+    }
+    
+    // Block until consensus processes this
+    debug!("Blocking process {} for network operation", pid);
+    block_process_for_network(&mut caller);
+    
+    // The consensus will have created a new NAT entry for the accepted connection
+    // We need to create a new socket FD for it
+    {
+        let process_data = caller.data();
+        let mut table = process_data.fd_table.lock().unwrap();
+        if fd_out >= (table.entries.len() as i32) {
+            error!("Invalid fd_out {} for process {}", fd_out, pid);
+            return 1; // Invalid FD
+        }
+        
+        // Create a new socket FD entry
+        table.entries[fd_out as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
+            local_port: src_port,
+            connected: true,
+        });
+    }
+    
+    0 // Success
 }
 
 pub fn wasi_sock_recv(

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{TcpStream, SocketAddr};
+use std::net::{TcpStream, TcpListener, SocketAddr};
 use std::io::{Write, Read};
 use log::{info, error, debug};
 use crate::commands::NetworkOperation;
@@ -11,9 +11,17 @@ pub struct NatEntry {
     pub connection: TcpStream,
 }
 
+pub struct NatListener {
+    pub process_id: u64,
+    pub process_port: u16,
+    pub consensus_port: u16,
+    pub listener: TcpListener,
+}
+
 pub struct NatTable {
     port_mappings: HashMap<u16, NatEntry>, // consensus_port -> entry
     process_ports: HashMap<(u64, u16), u16>, // (pid, process_port) -> consensus_port
+    listeners: HashMap<u16, NatListener>, // consensus_port -> listener
     next_port: u16,
 }
 
@@ -23,6 +31,7 @@ impl NatTable {
         NatTable {
             port_mappings: HashMap::new(),
             process_ports: HashMap::new(),
+            listeners: HashMap::new(),
             next_port: 10000, // Start from a high port number
         }
     }
@@ -37,6 +46,80 @@ impl NatTable {
     pub fn handle_network_operation(&mut self, pid: u64, op: NetworkOperation) -> Result<(), Box<dyn std::error::Error>> {
         debug!("Handling network operation for process {}: {:?}", pid, op);
         match op {
+            NetworkOperation::Listen { src_port } => {
+                let consensus_port = self.allocate_port();
+                let addr = format!("127.0.0.1:{}", consensus_port);
+                
+                debug!("Attempting to listen on {}", addr);
+                match TcpListener::bind(&addr) {
+                    Ok(listener) => {
+                        // Set to non-blocking mode
+                        if let Err(e) = listener.set_nonblocking(true) {
+                            error!("Failed to set non-blocking mode: {}", e);
+                        }
+                        
+                        let entry = NatListener {
+                            process_id: pid,
+                            process_port: src_port,
+                            consensus_port,
+                            listener,
+                        };
+                        
+                        self.listeners.insert(consensus_port, entry);
+                        self.process_ports.insert((pid, src_port), consensus_port);
+                        info!("Created NAT listener: {}:{} -> consensus:{}", 
+                            pid, src_port, consensus_port);
+                    }
+                    Err(e) => {
+                        error!("Failed to listen on {}: {}", addr, e);
+                        return Err(Box::new(e));
+                    }
+                }
+            }
+            NetworkOperation::Accept { src_port } => {
+                // Find the listener for this process:port
+                if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
+                    if let Some(listener) = self.listeners.get(&consensus_port) {
+                        match listener.listener.accept() {
+                            Ok((stream, addr)) => {
+                                // Set to non-blocking mode
+                                if let Err(e) = stream.set_nonblocking(true) {
+                                    error!("Failed to set non-blocking mode: {}", e);
+                                }
+                                
+                                let new_consensus_port = self.allocate_port();
+                                let entry = NatEntry {
+                                    process_id: pid,
+                                    process_port: src_port,
+                                    consensus_port: new_consensus_port,
+                                    connection: stream,
+                                };
+                                
+                                self.port_mappings.insert(new_consensus_port, entry);
+                                info!("Accepted connection from {} on {}:{} -> consensus:{}", 
+                                    addr, pid, src_port, new_consensus_port);
+                                
+                                // Return the new consensus port to the process
+                                // This will be handled by the runtime
+                                return Ok(());
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                // No connection available
+                                debug!("No connection available for accept on {}:{}", pid, src_port);
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                error!("Failed to accept connection on {}:{}: {}", pid, src_port, e);
+                                return Err(Box::new(e));
+                            }
+                        }
+                    } else {
+                        error!("No listener found for consensus port {}", consensus_port);
+                    }
+                } else {
+                    error!("No NAT mapping found for process {}:{}", pid, src_port);
+                }
+            }
             NetworkOperation::Connect { dest_addr, dest_port, src_port } => {
                 let consensus_port = self.allocate_port();
                 let addr = format!("{}:{}", dest_addr, dest_port);
