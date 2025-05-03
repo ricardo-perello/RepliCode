@@ -1,10 +1,10 @@
 use anyhow::Result;
 use wasmtime::Caller;
 use crate::runtime::process::ProcessData;
-use log::{info, error};
+use log::info;
 
 pub fn wasi_fd_advise(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
     offset: u64,
     len: u64,
@@ -15,7 +15,7 @@ pub fn wasi_fd_advise(
 }
 
 pub fn wasi_fd_allocate(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
     offset: u64,
     len: u64,
@@ -25,7 +25,7 @@ pub fn wasi_fd_allocate(
 }
 
 pub fn wasi_fd_datasync(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
 ) -> Result<u32> {
     info!("wasi_fd_datasync: fd={}", fd);
@@ -33,7 +33,7 @@ pub fn wasi_fd_datasync(
 }
 
 pub fn wasi_fd_fdstat_set_flags(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
     flags: u32,
 ) -> Result<u32> {
@@ -42,7 +42,7 @@ pub fn wasi_fd_fdstat_set_flags(
 }
 
 pub fn wasi_fd_fdstat_set_rights(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
     fs_rights_base: u64,
     fs_rights_inheriting: u64,
@@ -53,7 +53,7 @@ pub fn wasi_fd_fdstat_set_rights(
 }
 
 pub fn wasi_fd_filestat_get(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
     buf_ptr: u32,
 ) -> Result<u32> {
@@ -62,7 +62,7 @@ pub fn wasi_fd_filestat_get(
 }
 
 pub fn wasi_fd_filestat_set_size(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
     size: u64,
 ) -> Result<u32> {
@@ -71,7 +71,7 @@ pub fn wasi_fd_filestat_set_size(
 }
 
 pub fn wasi_fd_filestat_set_times(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
     atim: u64,
     mtim: u64,
@@ -83,7 +83,7 @@ pub fn wasi_fd_filestat_set_times(
 }
 
 pub fn wasi_fd_pread(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
     iovs_ptr: u32,
     iovs_len: u32,
@@ -96,7 +96,7 @@ pub fn wasi_fd_pread(
 }
 
 pub fn wasi_fd_pwrite(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
     iovs_ptr: u32,
     iovs_len: u32,
@@ -109,7 +109,7 @@ pub fn wasi_fd_pwrite(
 }
 
 pub fn wasi_fd_renumber(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     from: u32,
     to: u32,
 ) -> Result<u32> {
@@ -118,7 +118,7 @@ pub fn wasi_fd_renumber(
 }
 
 pub fn wasi_fd_sync(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
 ) -> Result<u32> {
     info!("wasi_fd_sync: fd={}", fd);
@@ -126,7 +126,7 @@ pub fn wasi_fd_sync(
 }
 
 pub fn wasi_fd_tell(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
     offset_ptr: u32,
 ) -> Result<u32> {

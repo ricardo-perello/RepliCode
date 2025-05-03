@@ -1,11 +1,11 @@
 use anyhow::Result;
 use wasmtime::Caller;
 use crate::runtime::process::ProcessData;
-use log::{info, error};
+use log::info;
 
 
 pub fn wasi_proc_raise(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     signal: u32,
 ) -> Result<u32> {
     info!("wasi_proc_raise: signal={}", signal);
@@ -13,14 +13,14 @@ pub fn wasi_proc_raise(
 }
 
 pub fn wasi_sched_yield(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
 ) -> Result<u32> {
     info!("wasi_sched_yield");
     Ok(0)
 }
 
 pub fn wasi_random_get(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     buf_ptr: u32,
     buf_len: u32,
 ) -> Result<u32> {

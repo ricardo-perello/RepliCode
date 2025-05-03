@@ -1,7 +1,5 @@
 use wasmtime::Caller;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
-use std::sync::Arc;
-use std::sync::Mutex;
 use consensus::commands::NetworkOperation;
 use anyhow::Result;
 use log::{info, error, debug};
@@ -339,7 +337,7 @@ pub fn wasi_sock_accept(
 }
 
 pub fn wasi_sock_recv(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
     ri_data_ptr: u32,
     ri_data_len: u32,
@@ -353,7 +351,7 @@ pub fn wasi_sock_recv(
 }
 
 pub fn wasi_sock_shutdown(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     fd: u32,
     how: u32,
 ) -> Result<u32> {

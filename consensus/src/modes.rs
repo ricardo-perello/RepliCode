@@ -1,11 +1,10 @@
-use std::io::{self, Write, Read, BufReader, BufWriter};
+use std::io::{self, Write, Read, BufReader};
 use std::fs::OpenOptions;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use log::{error, info, debug};
-use byteorder::{LittleEndian, ReadBytesExt};
 use bincode;
 
 // use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -151,7 +150,7 @@ pub fn run_tcp_mode() -> io::Result<()> {
     });
 
     // Add a thread to read from runtime and handle network operations
-    let mut runtime_reader = runtime_stream.try_clone()?;
+    let runtime_reader = runtime_stream.try_clone()?;
     let nat_table_clone: Arc<Mutex<NatTable>> = Arc::clone(&nat_table);
     thread::spawn(move || {
         let mut reader = BufReader::new(runtime_reader);
