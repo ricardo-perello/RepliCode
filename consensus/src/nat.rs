@@ -80,37 +80,37 @@ impl NatTable {
                 // Find the listener for this process:port
                 if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
                     if let Some(listener) = self.listeners.get(&consensus_port) {
-                        match listener.listener.accept() {
-                            Ok((stream, addr)) => {
-                                // Set to non-blocking mode
-                                if let Err(e) = stream.set_nonblocking(true) {
-                                    error!("Failed to set non-blocking mode: {}", e);
+                        // Keep trying to accept until we get a connection
+                        loop {
+                            match listener.listener.accept() {
+                                Ok((stream, addr)) => {
+                                    // Set to non-blocking mode
+                                    if let Err(e) = stream.set_nonblocking(true) {
+                                        error!("Failed to set non-blocking mode: {}", e);
+                                    }
+                                    
+                                    let new_consensus_port = self.allocate_port();
+                                    let entry = NatEntry {
+                                        process_id: pid,
+                                        process_port: src_port,
+                                        consensus_port: new_consensus_port,
+                                        connection: stream,
+                                    };
+                                    
+                                    self.port_mappings.insert(new_consensus_port, entry);
+                                    info!("Accepted connection from {} on {}:{} -> consensus:{}", 
+                                        addr, pid, src_port, new_consensus_port);
+                                    break;
                                 }
-                                
-                                let new_consensus_port = self.allocate_port();
-                                let entry = NatEntry {
-                                    process_id: pid,
-                                    process_port: src_port,
-                                    consensus_port: new_consensus_port,
-                                    connection: stream,
-                                };
-                                
-                                self.port_mappings.insert(new_consensus_port, entry);
-                                info!("Accepted connection from {} on {}:{} -> consensus:{}", 
-                                    addr, pid, src_port, new_consensus_port);
-                                
-                                // Return the new consensus port to the process
-                                // This will be handled by the runtime
-                                return Ok(());
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                // No connection available
-                                debug!("No connection available for accept on {}:{}", pid, src_port);
-                                return Ok(());
-                            }
-                            Err(e) => {
-                                error!("Failed to accept connection on {}:{}: {}", pid, src_port, e);
-                                return Err(Box::new(e));
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    // No connection available yet, keep waiting
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                    continue;
+                                }
+                                Err(e) => {
+                                    error!("Failed to accept connection on {}:{}: {}", pid, src_port, e);
+                                    return Err(Box::new(e));
+                                }
                             }
                         }
                     } else {

@@ -263,42 +263,79 @@ pub fn wasi_sock_accept(
         }
     }
     
-    // Queue the accept operation
-    {
-        let process_data = caller.data();
-        let op = NetworkOperation::Accept {
-            src_port,
-        };
-        
-        process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
-            pid,
-            operation: op,
-        });
-        info!("Queued accept operation for process {}:{}", pid, src_port);
-    }
-    
-    // Block until consensus processes this
-    debug!("Blocking process {} for network operation", pid);
-    block_process_for_network(&mut caller);
-    
-    // The consensus will have created a new NAT entry for the accepted connection
-    // We need to create a new socket FD for it
-    {
-        let process_data = caller.data();
-        let mut table = process_data.fd_table.lock().unwrap();
-        if fd_out >= (table.entries.len() as i32) {
-            error!("Invalid fd_out {} for process {}", fd_out, pid);
-            return 1; // Invalid FD
+    // Keep trying to accept until we get a connection
+    loop {
+        // Queue the accept operation
+        {
+            let process_data = caller.data();
+            let op = NetworkOperation::Accept {
+                src_port,
+            };
+            
+            process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
+                pid,
+                operation: op,
+            });
+            info!("Queued accept operation for process {}:{}", pid, src_port);
         }
         
-        // Create a new socket FD entry
-        table.entries[fd_out as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
-            local_port: src_port,
-            connected: true,
-        });
+        // Block until consensus processes this and returns a new connection
+        debug!("Blocking process {} for network operation", pid);
+        block_process_for_network(&mut caller);
+        
+        // Check if we got a connection and create new FD if we did
+        let (got_connection, new_fd) = {
+            let process_data = caller.data();
+            let table = process_data.fd_table.lock().unwrap();
+            if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { connected, .. })) = table.entries.get(fd as usize) {
+                if *connected {
+                    // We got a connection, create the new FD
+                    let mut table = process_data.fd_table.lock().unwrap();
+                    let new_fd = table.allocate_fd();
+                    if new_fd < 0 {
+                        error!("No free file descriptors available for accepted connection");
+                        return 76; // EMFILE
+                    }
+                    
+                    // Create a new socket FD entry for the accepted connection
+                    table.entries[new_fd as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
+                        local_port: src_port,
+                        connected: true,
+                    });
+                    
+                    (true, new_fd)
+                } else {
+                    (false, 0)
+                }
+            } else {
+                (false, 0)
+            }
+        };
+        
+        if got_connection {
+            // Write the new FD back to WASM memory
+            let memory = match caller.get_export("memory") {
+                Some(wasmtime::Extern::Memory(mem)) => mem,
+                _ => {
+                    error!("sock_accept: no memory export found");
+                    return 1; // EINVAL
+                }
+            };
+            let mem_mut = memory.data_mut(&mut caller);
+            let out_ptr = fd_out as usize;
+            if out_ptr + 4 > mem_mut.len() {
+                error!("sock_accept: fd_out pointer out of bounds");
+                return 1; // EINVAL
+            }
+            mem_mut[out_ptr..out_ptr+4].copy_from_slice(&(new_fd as u32).to_le_bytes());
+            info!("Created new socket FD {} for accepted connection on process {}:{}", new_fd, pid, src_port);
+            
+            return 0; // Success
+        }
+        
+        // No connection available yet, try again
+        debug!("No connection available yet for process {}:{}, retrying...", pid, src_port);
     }
-    
-    0 // Success
 }
 
 pub fn wasi_sock_recv(

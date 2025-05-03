@@ -59,16 +59,17 @@ int main() {
     }
     printf("Accepted connection with client fd: %d\n", client_fd);
 
-    // Receive data from client
-    ret = sock_recv(client_fd, buffer, sizeof(buffer), 0, &bytes_received, NULL);
-    if (ret != 0) {
-        printf("Failed to receive data\n");
-        return 1;
-    }
-    printf("Received %d bytes: %.*s\n", bytes_received, bytes_received, buffer);
+    // // Receive data from client
+    // ret = sock_recv(client_fd, buffer, sizeof(buffer), 0, &bytes_received, NULL);
+    // if (ret != 0) {
+    //     printf("Failed to receive data\n");
+    //     return 1;
+    // }
+    // printf("Received %d bytes: %.*s\n", bytes_received, bytes_received, buffer);
 
     // Echo back to client
-    ret = sock_send(client_fd, buffer, bytes_received, 0, &bytes_sent);
+    char* message = "Hello, client!";
+    ret = sock_send(client_fd, message, strlen(message), 0, &bytes_sent);
     if (ret != 0) {
         printf("Failed to send data\n");
         return 1;
