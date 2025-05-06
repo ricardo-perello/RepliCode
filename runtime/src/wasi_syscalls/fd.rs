@@ -1,5 +1,4 @@
 use wasmtime::{Caller, Extern};
-use std::io;
 use std::convert::TryInto;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
 use crate::runtime::clock::GlobalClock;

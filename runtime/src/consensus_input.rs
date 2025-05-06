@@ -166,7 +166,7 @@ pub fn process_consensus_pipe<R: Read + Write>(
                     continue;
                 }
                 
-                let dest_port = ((payload[0] as u16) | ((payload[1] as u16) << 8));
+                let dest_port = (payload[0] as u16) | ((payload[1] as u16) << 8);
                 let data = &payload[2..];
                 
                 debug!("Received {} bytes from network for process {} port {}", data.len(), process_id, dest_port);

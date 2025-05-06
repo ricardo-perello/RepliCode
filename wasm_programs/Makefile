@@ -5,7 +5,7 @@ WASM_CC = wasm32-wasi-clang
 CFLAGS = -Wl,--allow-undefined
 
 # Default target: build both program_a.wasm and program_b.wasm
-all:  build/network_test.wasm build/read_dir.wasm build/test_disk_limit.wasm build/test_rmdir.wasm build/test_escape_sandbox.wasm build/test_symlink.wasm build/test_unlink.wasm build/test_write_block.wasm
+all: build/network_server.wasm build/network_test.wasm build/program_a.wasm build/program_b.wasm build/program_c.wasm build/program_d.wasm build/mkdir_test.wasm
 
 # Pattern rule: compile any .c file into a .wasm in the build directory.
 build/%.wasm: %.c

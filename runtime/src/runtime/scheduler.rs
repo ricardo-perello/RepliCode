@@ -12,6 +12,7 @@ use log::{debug, error, info};
 use std::thread;
 use std::time::Duration;
 use crate::wasi_syscalls::net::OutgoingNetworkMessage;
+use crate::runtime::fd_table::FDEntry;
 
 struct BatchCollector {
     outgoing_messages: Vec<OutgoingNetworkMessage>,
@@ -171,7 +172,19 @@ where
                                 }
                             }
                             Some(BlockReason::Timeout { resume_after }) => GlobalClock::now() >= resume_after,
-                            Some(BlockReason::NetworkIO) => true, //TODO Network operations are handled by consensus
+                            Some(BlockReason::NetworkIO) => {
+                                // Check if the socket FD has been updated with connection data
+                                let fd_table = proc.data.fd_table.lock().unwrap();
+                                let mut has_connection = false;
+                                for entry in fd_table.entries.iter() {
+                                    if let Some(FDEntry::Socket { .. }) = entry {
+                                        // If we find a File entry, it means the socket was updated with connection data
+                                        has_connection = true;
+                                        break;
+                                    }
+                                }
+                                has_connection
+                            },
                             _ => false,
                         }
                     };

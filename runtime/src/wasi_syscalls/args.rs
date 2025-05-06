@@ -3,7 +3,7 @@ use wasmtime::Caller;
 use crate::runtime::process::ProcessData;
 
 pub fn wasi_args_get(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     argv_ptr: u32,
     argv_buf_ptr: u32,
 ) -> Result<u32> {
@@ -12,7 +12,7 @@ pub fn wasi_args_get(
 }
 
 pub fn wasi_args_sizes_get(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     argc_ptr: u32,
     argv_buf_size_ptr: u32,
 ) -> Result<u32> {
@@ -21,7 +21,7 @@ pub fn wasi_args_sizes_get(
 }
 
 pub fn wasi_environ_get(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     environ_ptr: u32,
     environ_buf_ptr: u32,
 ) -> Result<u32> {
@@ -30,7 +30,7 @@ pub fn wasi_environ_get(
 }
 
 pub fn wasi_environ_sizes_get(
-    mut caller: Caller<ProcessData>,
+    caller: Caller<ProcessData>,
     environ_count_ptr: u32,
     environ_buf_size_ptr: u32,
 ) -> Result<u32> {
