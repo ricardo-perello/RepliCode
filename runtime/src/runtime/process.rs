@@ -120,7 +120,6 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
             };
 
             if preload_size > max_disk_usage {
-                // TODO handle it (e.g. kill or fail)
                 error!(
                     "Preloaded data ({}) exceeds disk quota ({}) for process {}! Aborting...",
                     preload_size, max_disk_usage, id

@@ -8,6 +8,9 @@ use std::io::Write;
 
 use crate::runtime::process::{ProcessData, ProcessState, BlockReason};
 use crate::runtime::fd_table::{FDEntry, MAX_FDS};
+const WASI_ERRNO_NOSPC: i32 = 28;  // __WASI_ERRNO_NOSPC
+const WASI_ERRNO_NOSYS: i32 = 52;  // __WASI_ERRNO_NOSYS
+
 
 fn io_err_to_wasi_errno(e: &io::Error) -> i32 {
     use io::ErrorKind::*;
@@ -58,7 +61,7 @@ fn usage_add(caller: &mut Caller<'_, ProcessData>, bytes: u64) -> Result<(), i32
     // 2) If over the limit, kill the process
     if over_limit {
         eprintln!("Exceeded disk quota! Killing process...");
-        kill_process(caller);
+        return Err(WASI_ERRNO_NOSPC);//TODO return error code
     }
 
     Ok(())
@@ -86,18 +89,6 @@ pub fn get_dir_size(path: &Path) -> io::Result<u64> {
         }
     }
     Ok(size)
-}
-
-/// Kill the current process: mark it Finished, remove its directory.
-fn kill_process(caller: &mut Caller<'_, ProcessData>) -> () {
-    {
-        let mut st = caller.data().state.lock().unwrap();
-        *st = ProcessState::Finished;
-    }
-    let pd = caller.data();
-    pd.cond.notify_all();
-    // Just exit with status code 1
-    panic!("WASM process aborted by runtime (quota or sandbox violation)"); //TODO check with gauthier
 }
 
 // ----------------------------------------------------------------------------
@@ -373,8 +364,7 @@ pub fn wasi_path_symlink(
     _new_path_len: i32,
 ) -> i32 {
     eprintln!("path_symlink: not yet implemented");
-    kill_process(&mut caller);
-    1
+    return WASI_ERRNO_NOSYS;
 }
 
 
