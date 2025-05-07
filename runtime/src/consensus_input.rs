@@ -184,8 +184,21 @@ pub fn process_consensus_pipe<R: Read + Write>(
                                 // Update the runtime's NAT table to match consensus
                                 let mut nat_table = process.data.nat_table.lock().unwrap();
                                 nat_table.add_port_mapping(process_id, src_port);
+                                // For accept operations, set the pending accept flag
+                                let fd_table = process.data.fd_table.lock().unwrap();
+                                for entry in fd_table.entries.iter() {
+                                    if let Some(FDEntry::Socket { local_port, .. }) = entry {
+                                        if *local_port == src_port {
+                                            nat_table.set_pending_accept(process_id, src_port);
+                                            break;
+                                        }
+                                    }
+                                }
                             } else {
                                 error!("Network operation failed for process {}:{}", process_id, src_port);
+                                // For accept operations, ensure pending accept is false
+                                let mut nat_table = process.data.nat_table.lock().unwrap();
+                                nat_table.clear_pending_accept(process_id, src_port);
                             }
                             // Notify the process that the operation completed
                             process.data.cond.notify_all();

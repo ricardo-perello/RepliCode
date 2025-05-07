@@ -221,6 +221,10 @@ impl NatTable {
         self.pending_accepts.remove(&(pid, src_port));
     }
 
+    pub fn set_pending_accept(&mut self, pid: u64, src_port: u16) {
+        self.pending_accepts.insert((pid, src_port), true);
+    }
+
     pub fn check_for_incoming_data(&mut self) -> Vec<(u64, u16, Vec<u8>)> {
         //debug!("Checking for incoming data on all NAT connections (total connections: {})", self.port_mappings.len());
         let mut messages = Vec::new();
