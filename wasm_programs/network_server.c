@@ -51,11 +51,20 @@ int main() {
     }
     printf("Server listening on port 7000\n");
 
-    // Accept a connection
-    ret = sock_accept(server_fd, 0, &client_fd);
-    if (ret != 0) {
-        printf("Failed to accept connection\n");
-        return 1;
+    // Accept a connection with retry loop
+    while (1) {
+        ret = sock_accept(server_fd, 0, &client_fd);
+        if (ret == 0) {
+            // Successfully accepted a connection
+            break;
+        } else if (ret == 11) { // EAGAIN
+            // No connection available yet, retry
+            continue;
+        } else {
+            // Some other error occurred
+            printf("Failed to accept connection (error: %d)\n", ret);
+            return 1;
+        }
     }
     printf("Accepted connection with client fd: %d\n", client_fd);
 

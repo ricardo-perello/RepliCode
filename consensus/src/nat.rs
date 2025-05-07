@@ -23,6 +23,7 @@ pub struct NatTable {
     process_ports: HashMap<(u64, u16), u16>, // (pid, process_port) -> consensus_port
     listeners: HashMap<u16, NatListener>, // consensus_port -> listener
     next_port: u16,
+    pending_accepts: HashMap<(u64, u16), bool>, // (pid, src_port) -> has_connection
 }
 
 impl NatTable {
@@ -33,6 +34,7 @@ impl NatTable {
             process_ports: HashMap::new(),
             listeners: HashMap::new(),
             next_port: 10000, // Start from a high port number
+            pending_accepts: HashMap::new(),
         }
     }
 
@@ -80,37 +82,35 @@ impl NatTable {
                 // Find the listener for this process:port
                 if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
                     if let Some(listener) = self.listeners.get(&consensus_port) {
-                        // Keep trying to accept until we get a connection
-                        loop {
-                            match listener.listener.accept() {
-                                Ok((stream, addr)) => {
-                                    // Set to non-blocking mode
-                                    if let Err(e) = stream.set_nonblocking(true) {
-                                        error!("Failed to set non-blocking mode: {}", e);
-                                    }
-                                    
-                                    let new_consensus_port = self.allocate_port();
-                                    let entry = NatEntry {
-                                        process_id: pid,
-                                        process_port: src_port,
-                                        consensus_port: new_consensus_port,
-                                        connection: stream,
-                                    };
-                                    
-                                    self.port_mappings.insert(new_consensus_port, entry);
-                                    info!("Accepted connection from {} on {}:{} -> consensus:{}", 
-                                        addr, pid, src_port, new_consensus_port);
-                                    break;
+                        // Try to accept once
+                        match listener.listener.accept() {
+                            Ok((stream, addr)) => {
+                                // Set to non-blocking mode
+                                if let Err(e) = stream.set_nonblocking(true) {
+                                    error!("Failed to set non-blocking mode: {}", e);
                                 }
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    // No connection available yet, keep waiting
-                                    std::thread::sleep(std::time::Duration::from_millis(100));
-                                    continue;
-                                }
-                                Err(e) => {
-                                    error!("Failed to accept connection on {}:{}: {}", pid, src_port, e);
-                                    return Err(Box::new(e));
-                                }
+                                
+                                let new_consensus_port = self.allocate_port();
+                                let entry = NatEntry {
+                                    process_id: pid,
+                                    process_port: src_port,
+                                    consensus_port: new_consensus_port,
+                                    connection: stream,
+                                };
+                                
+                                self.port_mappings.insert(new_consensus_port, entry);
+                                self.pending_accepts.insert((pid, src_port), true);
+                                info!("Accepted connection from {} on {}:{} -> consensus:{}", 
+                                    addr, pid, src_port, new_consensus_port);
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                // No connection available yet
+                                self.pending_accepts.insert((pid, src_port), false);
+                                debug!("No connection available for {}:{}", pid, src_port);
+                            }
+                            Err(e) => {
+                                error!("Failed to accept connection on {}:{}: {}", pid, src_port, e);
+                                return Err(Box::new(e));
                             }
                         }
                     } else {
@@ -193,6 +193,14 @@ impl NatTable {
             }
         }
         Ok(())
+    }
+
+    pub fn has_pending_accept(&self, pid: u64, src_port: u16) -> bool {
+        self.pending_accepts.get(&(pid, src_port)).copied().unwrap_or(false)
+    }
+
+    pub fn clear_pending_accept(&mut self, pid: u64, src_port: u16) {
+        self.pending_accepts.remove(&(pid, src_port));
     }
 
     pub fn check_for_incoming_data(&mut self) -> Vec<(u64, u16, Vec<u8>)> {

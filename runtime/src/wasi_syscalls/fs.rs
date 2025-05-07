@@ -356,7 +356,7 @@ pub fn wasi_path_create_directory(
 /// mark the process as Finished, notify the scheduler,
 /// and then loop indefinitely until the scheduler joins the thread.
 pub fn wasi_path_symlink(
-    mut caller: Caller<'_, ProcessData>,
+    caller: Caller<'_, ProcessData>,
     _old_path_ptr: i32,
     _old_path_len: i32,
     _new_dirfd: i32,
