@@ -115,6 +115,7 @@ pub fn run_tcp_mode() -> io::Result<()> {
 
     // Clone the shared buffer and stream for the flush thread.
     let flush_buffer: Arc<Mutex<Vec<u8>>> = Arc::clone(&shared_buffer);
+    let shared_buffer_clone: Arc<Mutex<Vec<u8>>> = Arc::clone(&shared_buffer);
     let mut flush_stream = runtime_stream.try_clone()?;
 
     // Create NAT table for handling network operations
@@ -191,8 +192,30 @@ pub fn run_tcp_mode() -> io::Result<()> {
                 match bincode::deserialize::<NetworkOperation>(&payload) {
                     Ok(op) => {
                         debug!("Received network operation from runtime for process {}: {:?}", pid, op);
-                        if let Err(e) = nat_table_clone.lock().unwrap().handle_network_operation(pid, op) {
-                            error!("Failed to handle network operation: {}", e);
+                        // Get source port before moving op
+                        let src_port = match &op {
+                            NetworkOperation::Listen { src_port } => *src_port,
+                            NetworkOperation::Accept { src_port } => *src_port,
+                            NetworkOperation::Connect { src_port, .. } => *src_port,
+                            NetworkOperation::Send { src_port, .. } => *src_port,
+                            NetworkOperation::Close { src_port } => *src_port,
+                        };
+                        match nat_table_clone.lock().unwrap().handle_network_operation(pid, op) {
+                            Ok(success) => {
+                                // Send success status back to runtime
+                                let mut buf = shared_buffer_clone.lock().unwrap();
+                                if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![if success { 1 } else { 0 }, src_port as u8, (src_port >> 8) as u8])) {
+                                    buf.extend(record);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to handle network operation: {}", e);
+                                // Send error status back to runtime
+                                let mut buf = shared_buffer_clone.lock().unwrap();
+                                if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![0])) {
+                                    buf.extend(record);
+                                }
+                            }
                         }
                     }
                     Err(e) => {

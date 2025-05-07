@@ -45,7 +45,7 @@ impl NatTable {
         port
     }
 
-    pub fn handle_network_operation(&mut self, pid: u64, op: NetworkOperation) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn handle_network_operation(&mut self, pid: u64, op: NetworkOperation) -> Result<bool, Box<dyn std::error::Error>> {
         debug!("Handling network operation for process {}: {:?}", pid, op);
         match op {
             NetworkOperation::Listen { src_port } => {
@@ -71,10 +71,11 @@ impl NatTable {
                         self.process_ports.insert((pid, src_port), consensus_port);
                         info!("Created NAT listener: {}:{} -> consensus:{}", 
                             pid, src_port, consensus_port);
+                        Ok(true) // Success
                     }
                     Err(e) => {
                         error!("Failed to listen on {}: {}", addr, e);
-                        return Err(Box::new(e));
+                        Err(Box::new(e))
                     }
                 }
             }
@@ -102,22 +103,26 @@ impl NatTable {
                                 self.pending_accepts.insert((pid, src_port), true);
                                 info!("Accepted connection from {} on {}:{} -> consensus:{}", 
                                     addr, pid, src_port, new_consensus_port);
+                                Ok(true)
                             }
                             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                                 // No connection available yet
                                 self.pending_accepts.insert((pid, src_port), false);
                                 debug!("No connection available for {}:{}", pid, src_port);
+                                Ok(false)
                             }
                             Err(e) => {
                                 error!("Failed to accept connection on {}:{}: {}", pid, src_port, e);
-                                return Err(Box::new(e));
+                                Err(Box::new(e))
                             }
                         }
                     } else {
                         error!("No listener found for consensus port {}", consensus_port);
+                        Ok(false)
                     }
                 } else {
                     error!("No NAT mapping found for process {}:{}", pid, src_port);
+                    Ok(false)
                 }
             }
             NetworkOperation::Connect { dest_addr, dest_port, src_port } => {
@@ -143,10 +148,11 @@ impl NatTable {
                         self.process_ports.insert((pid, src_port), consensus_port);
                         info!("Created NAT entry: {}:{} -> consensus:{} -> {}:{}", 
                             pid, src_port, consensus_port, dest_addr, dest_port);
+                        Ok(true)
                     }
                     Err(e) => {
                         error!("Failed to connect to {}: {}", addr, e);
-                        return Err(Box::new(e));
+                        Err(Box::new(e))
                     }
                 }
             }
@@ -168,17 +174,20 @@ impl NatTable {
                                     return Err(Box::new(e));
                                 }
                                 info!("Successfully sent and flushed {} bytes to destination", data.len());
+                                Ok(true)
                             }
                             Err(e) => {
                                 error!("Failed to send data to destination: {}", e);
-                                return Err(Box::new(e));
+                                Err(Box::new(e))
                             }
                         }
                     } else {
                         error!("Inconsistent state: consensus port {} found but no mapping entry exists", consensus_port);
+                        Ok(false)
                     }
                 } else {
                     error!("No NAT mapping found for process {}:{}", pid, src_port);
+                    Ok(false)
                 }
             }
             NetworkOperation::Close { src_port } => {
@@ -187,16 +196,25 @@ impl NatTable {
                     self.port_mappings.remove(&consensus_port);
                     self.process_ports.remove(&(pid, src_port));
                     info!("Closed NAT entry for {}:{}", pid, src_port);
+                    Ok(true)
                 } else {
                     error!("No NAT mapping found to close for process {}:{}", pid, src_port);
+                    Ok(false)
                 }
             }
         }
-        Ok(())
     }
 
     pub fn has_pending_accept(&self, pid: u64, src_port: u16) -> bool {
         self.pending_accepts.get(&(pid, src_port)).copied().unwrap_or(false)
+    }
+
+    pub fn has_port_mapping(&self, pid: u64, src_port: u16) -> bool {
+        self.process_ports.contains_key(&(pid, src_port))
+    }
+
+    pub fn add_port_mapping(&mut self, pid: u64, src_port: u16) {
+        self.process_ports.insert((pid, src_port), 0);
     }
 
     pub fn clear_pending_accept(&mut self, pid: u64, src_port: u16) {

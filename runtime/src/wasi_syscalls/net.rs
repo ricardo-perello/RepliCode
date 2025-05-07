@@ -59,6 +59,7 @@ pub fn wasi_sock_open(
         table.entries[fd as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
             local_port: src_port,
             connected: false,
+            buffer: Vec::new(),
         });
         info!("Created socket FD {} for process {}:{}", fd, pid, src_port);
     }
@@ -235,7 +236,20 @@ pub fn wasi_sock_listen(
     // Block until consensus processes this
     debug!("Blocking process {} for network operation", pid);
     block_process_for_network(&mut caller);
-    0 // Success
+
+    // Check if the listen operation succeeded by verifying the NAT mapping exists
+    let listen_succeeded = {
+        let process_data = caller.data();
+        process_data.nat_table.lock().unwrap().has_port_mapping(pid, src_port)
+    };
+
+    if listen_succeeded {
+        info!("Listen operation succeeded for process {}:{}", pid, src_port);
+        0 // Success
+    } else {
+        error!("Listen operation failed for process {}:{}", pid, src_port);
+        1 // EINVAL - Invalid argument
+    }
 }
 
 pub fn wasi_sock_accept(
@@ -298,6 +312,7 @@ pub fn wasi_sock_accept(
             table.entries[new_fd as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
                 local_port: src_port,
                 connected: true,
+                buffer: Vec::new(),
             });
             new_fd
         };
@@ -333,17 +348,76 @@ pub fn wasi_sock_accept(
 }
 
 pub fn wasi_sock_recv(
-    caller: Caller<ProcessData>,
+    mut caller: Caller<'_, ProcessData>,
     fd: u32,
     ri_data_ptr: u32,
     ri_data_len: u32,
     ri_flags: u32,
     ro_datalen_ptr: u32,
     ro_flags_ptr: u32,
-) -> Result<u32> {
-    info!("wasi_sock_recv: fd={}, ri_data_ptr={}, ri_data_len={}, ri_flags={}, ro_datalen_ptr={}, ro_flags_ptr={}", 
+) -> i32 {
+    debug!("wasi_sock_recv: fd={}, ri_data_ptr={}, ri_data_len={}, ri_flags={}, ro_datalen_ptr={}, ro_flags_ptr={}", 
         fd, ri_data_ptr, ri_data_len, ri_flags, ro_datalen_ptr, ro_flags_ptr);
-    Ok(0)
+    
+    let pid;
+    let src_port;
+    let data;
+    
+    // Get socket FD entry and data
+    {
+        let process_data = caller.data();
+        pid = process_data.id;
+        let mut table = process_data.fd_table.lock().unwrap();
+        if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, buffer, .. })) = table.entries.get_mut(fd as usize) {
+            src_port = *local_port;
+            if buffer.is_empty() {
+                debug!("No data available for socket {}:{}", pid, src_port);
+                return 11; // EAGAIN
+            }
+            data = buffer.drain(..).collect::<Vec<u8>>();
+        } else {
+            error!("Invalid socket FD {} for process {}", fd, pid);
+            return 1; // EINVAL
+        }
+    }
+
+    // Get the memory to write data to
+    let memory = match caller.get_export("memory") {
+        Some(wasmtime::Extern::Memory(mem)) => mem,
+        _ => {
+            error!("sock_recv: no memory export found");
+            return 1; // EINVAL
+        }
+    };
+    let mem_mut = memory.data_mut(&mut caller);
+
+    // Write data to memory
+    let data_len = data.len().min(ri_data_len as usize);
+    let out_ptr = ri_data_ptr as usize;
+    if out_ptr + data_len > mem_mut.len() {
+        error!("sock_recv: data pointer out of bounds");
+        return 1; // EINVAL
+    }
+    mem_mut[out_ptr..out_ptr + data_len].copy_from_slice(&data[..data_len]);
+
+    // Write data length back to memory
+    let len_ptr = ro_datalen_ptr as usize;
+    if len_ptr + 4 > mem_mut.len() {
+        error!("sock_recv: length pointer out of bounds");
+        return 1; // EINVAL
+    }
+    mem_mut[len_ptr..len_ptr + 4].copy_from_slice(&(data_len as u32).to_le_bytes());
+
+    // Write flags back to memory (0 for now)
+    let flags_ptr = ro_flags_ptr as usize;
+    if flags_ptr + 4 > mem_mut.len() {
+        error!("sock_recv: flags pointer out of bounds");
+        return 1; // EINVAL
+    }
+    mem_mut[flags_ptr..flags_ptr + 4].copy_from_slice(&0u32.to_le_bytes());
+
+    info!("Read {} bytes from socket {}:{}", data_len, pid, src_port);
+    0 // Success
 }
 
 pub fn wasi_sock_shutdown(

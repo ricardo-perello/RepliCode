@@ -169,12 +169,29 @@ pub fn process_consensus_pipe<R: Read + Write>(
                 let dest_port = (payload[0] as u16) | ((payload[1] as u16) << 8);
                 let data = &payload[2..];
                 
-                debug!("Received {} bytes from network for process {} port {}", data.len(), process_id, dest_port);
+                debug!("Received {} bytes from network for process {} port {}: {}", data.len(), process_id, dest_port, String::from_utf8_lossy(data));
                 
                 let mut found = false;
                 for process in processes.iter_mut() {
                     if process.id == process_id {
                         found = true;
+                        // If this is a success status message (port 0)
+                        if dest_port == 0 && data.len() >= 3 {
+                            let success = data[0] == 1;
+                            let src_port = (data[1] as u16) | ((data[2] as u16) << 8);
+                            if success {
+                                info!("Network operation succeeded for process {}:{}", process_id, src_port);
+                                // Update the runtime's NAT table to match consensus
+                                let mut nat_table = process.data.nat_table.lock().unwrap();
+                                nat_table.add_port_mapping(process_id, src_port);
+                            } else {
+                                error!("Network operation failed for process {}:{}", process_id, src_port);
+                            }
+                            // Notify the process that the operation completed
+                            process.data.cond.notify_all();
+                            break;
+                        }
+                        
                         // Find socket with matching port
                         let mut matching_fd = None;
                         {
@@ -192,20 +209,10 @@ pub fn process_consensus_pipe<R: Read + Write>(
                         // If we found a matching socket, update it with the data
                         if let Some(fd) = matching_fd {
                             let mut table = process.data.fd_table.lock().unwrap();
-                            if fd < table.entries.len() {
-                                let buffer_entry = table.entries.get_mut(fd).unwrap();
-                                if let Some(FDEntry::Socket { .. }) = buffer_entry {
-                                    // Create a temporary file buffer for this fd to store the data
-                                    *buffer_entry = Some(FDEntry::File {
-                                        host_path: None,
-                                        buffer: data.to_vec(),
-                                        read_ptr: 0,
-                                        is_directory: false,
-                                        is_preopen: false,
-                                    });
-                                    info!("Added NetworkIn data to process {}'s FD {} ({} bytes)", 
-                                         process_id, fd, data.len());
-                                }
+                            if let Some(Some(FDEntry::Socket { buffer, .. })) = table.entries.get_mut(fd) {
+                                buffer.extend_from_slice(data);
+                                info!("Added NetworkIn data to process {}'s socket FD {} ({} bytes)", 
+                                     process_id, fd, data.len());
                             }
                         }
                         

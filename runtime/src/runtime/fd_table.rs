@@ -15,6 +15,7 @@ pub enum FDEntry {
     Socket {
         local_port: u16,
         connected: bool,
+        buffer: Vec<u8>,    // data waiting to be read
     },
 }
 
@@ -32,8 +33,12 @@ impl fmt::Display for FDEntry {
                     buffer_str, read_ptr, is_directory, is_preopen, host_path
                 )
             },
-            FDEntry::Socket { local_port, connected } => {
-                write!(f, "Socket(local_port: {}, connected: {})", local_port, connected)
+            FDEntry::Socket { local_port, connected, buffer } => {
+                let buffer_str = match std::str::from_utf8(&buffer) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => format!("{:?}", buffer),
+                };
+                write!(f, "Socket(local_port: {}, connected: {}, buffer: \"{}\")", local_port, connected, buffer_str)
             },
         }
     }
@@ -110,7 +115,7 @@ impl FDTable {
         if let Some(Some(entry)) = self.entries.get(fd as usize) {
             match entry {
                 FDEntry::File { buffer, read_ptr, .. } => *read_ptr < buffer.len(),
-                FDEntry::Socket { .. } => false,
+                FDEntry::Socket { buffer, .. } => !buffer.is_empty(),
             }
         } else {
             false
