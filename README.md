@@ -171,9 +171,14 @@ struct NatTable {
 
 3. **Accepting Connections**
    - Process calls `wasi_sock_accept`
-   - Runtime checks for pending connections
-   - If available, creates new socket FD
-   - If not, returns EAGAIN
+   - Runtime preallocates new FD and port for the connection
+   - If accept succeeds:
+     - New socket is created with preallocated port
+     - Connection is established
+   - If accept fails:
+     - Preallocated FD is freed
+     - Port counter is reverted
+     - Returns EAGAIN for retry
 
 4. **Sending Data**
    - Process calls `wasi_sock_send`
@@ -182,8 +187,15 @@ struct NatTable {
 
 5. **Receiving Data**
    - Data arrives via consensus
-   - Runtime routes to correct socket
+   - Runtime routes to correct socket based on port mapping
    - Process reads via `wasi_sock_recv`
+
+### **Port Management**
+The system implements deterministic port allocation:
+- Each process maintains its own port counter
+- Ports are preallocated for accept operations
+- Failed accepts trigger port counter reversion
+- Port mappings ensure consistent routing across nodes
 
 ### **Message Batching**
 The system uses a batching mechanism for network operations:
