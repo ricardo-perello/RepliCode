@@ -15,6 +15,7 @@ pub enum FDEntry {
     Socket {
         local_port: u16,
         connected: bool,
+        is_listener: bool,  // whether this is a listening socket
         buffer: Vec<u8>,    // data waiting to be read
     },
 }
@@ -33,12 +34,13 @@ impl fmt::Display for FDEntry {
                     buffer_str, read_ptr, is_directory, is_preopen, host_path
                 )
             },
-            FDEntry::Socket { local_port, connected, buffer } => {
+            FDEntry::Socket { local_port, connected, is_listener, buffer } => {
                 let buffer_str = match std::str::from_utf8(&buffer) {
                     Ok(s) => s.to_string(),
                     Err(_) => format!("{:?}", buffer),
                 };
-                write!(f, "Socket(local_port: {}, connected: {}, buffer: \"{}\")", local_port, connected, buffer_str)
+                write!(f, "Socket(local_port: {}, connected: {}, is_listener: {}, buffer: \"{}\")", 
+                       local_port, connected, is_listener, buffer_str)
             },
         }
     }

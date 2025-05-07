@@ -10,8 +10,6 @@ pub struct OutgoingNetworkMessage {
     pub operation: NetworkOperation,
 }
 
-//TODO dummy version, need to talk to gauthier to ensure how it goes through consensus
-
 
 pub fn wasi_sock_open(
     mut caller: Caller<'_, ProcessData>,
@@ -59,6 +57,7 @@ pub fn wasi_sock_open(
         table.entries[fd as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
             local_port: src_port,
             connected: false,
+            is_listener: false,  // New sockets start as non-listeners
             buffer: Vec::new(),
         });
         info!("Created socket FD {} for process {}:{}", fd, pid, src_port);
@@ -244,6 +243,14 @@ pub fn wasi_sock_listen(
     };
 
     if listen_succeeded {
+        // Mark the socket as a listener
+        {
+            let process_data = caller.data();
+            let mut table = process_data.fd_table.lock().unwrap();
+            if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { is_listener, .. })) = table.entries.get_mut(fd as usize) {
+                *is_listener = true;
+            }
+        }
         info!("Listen operation succeeded for process {}:{}", pid, src_port);
         0 // Success
     } else {
@@ -275,18 +282,42 @@ pub fn wasi_sock_accept(
         }
     }
     
-    // Queue the accept operation
+    // Preallocate FD and port for the accepted connection
+    let (new_fd, new_port) = {
+        let process_data = caller.data();
+        let mut table = process_data.fd_table.lock().unwrap();
+        let new_fd = table.allocate_fd();
+        if new_fd < 0 {
+            error!("No free file descriptors available for accepted connection");
+            return 76; // EMFILE
+        }
+        let new_port = {
+            let mut port = process_data.next_port.lock().unwrap();
+            *port += 1;
+            *port
+        };
+        table.entries[new_fd as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
+            local_port: new_port,
+            connected: true,
+            is_listener: false,  // Accepted connections are never listeners
+            buffer: Vec::new(),
+        });
+        (new_fd, new_port)
+    };
+    
+    // Queue the accept operation with the preallocated port
     {
         let process_data = caller.data();
         let op = NetworkOperation::Accept {
             src_port,
+            new_port,
         };
         
         process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
             pid,
             operation: op,
         });
-        info!("Queued accept operation for process {}:{}", pid, src_port);
+        info!("Queued accept operation for process {}:{} -> new port {}", pid, src_port, new_port);
     }
     
     // Block until consensus processes this
@@ -300,23 +331,6 @@ pub fn wasi_sock_accept(
     };
 
     if has_connection {
-        // Create new FD for the accepted connection
-        let new_fd = {
-            let process_data = caller.data();
-            let mut table = process_data.fd_table.lock().unwrap();
-            let new_fd = table.allocate_fd();
-            if new_fd < 0 {
-                error!("No free file descriptors available for accepted connection");
-                return 76; // EMFILE
-            }
-            table.entries[new_fd as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
-                local_port: src_port,
-                connected: true,
-                buffer: Vec::new(),
-            });
-            new_fd
-        };
-
         // Write the new FD back to WASM memory
         let memory = match caller.get_export("memory") {
             Some(wasmtime::Extern::Memory(mem)) => mem,
@@ -339,9 +353,17 @@ pub fn wasi_sock_accept(
             process_data.nat_table.lock().unwrap().clear_pending_accept(pid, src_port);
         }
 
-        info!("Created new socket FD {} for accepted connection on process {}:{}", new_fd, pid, src_port);
+        info!("Created new socket FD {} for accepted connection on process {}:{} -> {}", new_fd, pid, src_port, new_port);
         0 // Success
     } else {
+        // Revert the port allocation and FD
+        {
+            let process_data = caller.data();
+            let mut table = process_data.fd_table.lock().unwrap();
+            table.entries[new_fd as usize] = None;  // Free the FD
+            let mut port = process_data.next_port.lock().unwrap();
+            *port -= 1;  // Revert the port counter
+        }
         debug!("No connection available yet for process {}:{}, will retry", pid, src_port);
         11 // EAGAIN - Resource temporarily unavailable
     }

@@ -209,11 +209,23 @@ pub fn process_consensus_pipe<R: Read + Write>(
                         let mut matching_fd = None;
                         {
                             let table = process.data.fd_table.lock().unwrap();
+                            // First look for an accepted connection socket
                             for (fd, entry) in table.entries.iter().enumerate() {
-                                if let Some(FDEntry::Socket { local_port, .. }) = entry {
-                                    if *local_port == dest_port {
+                                if let Some(FDEntry::Socket { local_port, is_listener, .. }) = entry {
+                                    if *local_port == dest_port && !*is_listener {
                                         matching_fd = Some(fd);
                                         break;
+                                    }
+                                }
+                            }
+                            // If no accepted connection found, look for a listening socket
+                            if matching_fd.is_none() {
+                                for (fd, entry) in table.entries.iter().enumerate() {
+                                    if let Some(FDEntry::Socket { local_port, is_listener, .. }) = entry {
+                                        if *local_port == dest_port && *is_listener {
+                                            matching_fd = Some(fd);
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -227,6 +239,8 @@ pub fn process_consensus_pipe<R: Read + Write>(
                                 info!("Added NetworkIn data to process {}'s socket FD {} ({} bytes)", 
                                      process_id, fd, data.len());
                             }
+                        } else {
+                            error!("No matching socket found for process {} port {}", process_id, dest_port);
                         }
                         
                         // Notify waiting process

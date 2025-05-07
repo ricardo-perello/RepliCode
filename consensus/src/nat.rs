@@ -22,6 +22,7 @@ pub struct NatTable {
     port_mappings: HashMap<u16, NatEntry>, // consensus_port -> entry
     process_ports: HashMap<(u64, u16), u16>, // (pid, process_port) -> consensus_port
     listeners: HashMap<u16, NatListener>, // consensus_port -> listener
+    connections: HashMap<(u64, u16), u16>, // (pid, process_port) -> connection_consensus_port
     next_port: u16,
     pending_accepts: HashMap<(u64, u16), bool>, // (pid, src_port) -> has_connection
 }
@@ -33,6 +34,7 @@ impl NatTable {
             port_mappings: HashMap::new(),
             process_ports: HashMap::new(),
             listeners: HashMap::new(),
+            connections: HashMap::new(),
             next_port: 10000, // Start from a high port number
             pending_accepts: HashMap::new(),
         }
@@ -79,10 +81,10 @@ impl NatTable {
                     }
                 }
             }
-            NetworkOperation::Accept { src_port } => {
+            NetworkOperation::Accept { src_port, new_port } => {
                 // Find the listener for this process:port
-                if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
-                    if let Some(listener) = self.listeners.get(&consensus_port) {
+                if let Some(&listener_consensus_port) = self.process_ports.get(&(pid, src_port)) {
+                    if let Some(listener) = self.listeners.get(&listener_consensus_port) {
                         // Try to accept once
                         match listener.listener.accept() {
                             Ok((stream, addr)) => {
@@ -91,18 +93,21 @@ impl NatTable {
                                     error!("Failed to set non-blocking mode: {}", e);
                                 }
                                 
-                                let new_consensus_port = self.allocate_port();
+                                // Only allocate a new port when we successfully accept
+                                let consensus_port = self.allocate_port();
                                 let entry = NatEntry {
                                     process_id: pid,
-                                    process_port: src_port,
-                                    consensus_port: new_consensus_port,
+                                    process_port: new_port,  // Use the new port
+                                    consensus_port,
                                     connection: stream,
                                 };
                                 
-                                self.port_mappings.insert(new_consensus_port, entry);
+                                // Keep the listener's port mapping and add new one for accepted connection
+                                self.port_mappings.insert(consensus_port, entry);
+                                self.connections.insert((pid, new_port), consensus_port);  // Use new_port
                                 self.pending_accepts.insert((pid, src_port), true);
-                                info!("Accepted connection from {} on {}:{} -> consensus:{}", 
-                                    addr, pid, src_port, new_consensus_port);
+                                info!("Accepted connection from {} on {}:{} -> new port {} (listener: {})", 
+                                    addr, pid, src_port, new_port, listener_consensus_port);
                                 Ok(true)
                             }
                             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -117,7 +122,7 @@ impl NatTable {
                             }
                         }
                     } else {
-                        error!("No listener found for consensus port {}", consensus_port);
+                        error!("No listener found for consensus port {}", listener_consensus_port);
                         Ok(false)
                     }
                 } else {
@@ -160,24 +165,46 @@ impl NatTable {
                 info!("Processing send operation for process {}:{} ({} bytes): {:?}", 
                      pid, src_port, data.len(), String::from_utf8_lossy(&data));
                 
-                // Check if we have a mapping for this process:port
-                if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
-                    debug!("Found NAT mapping: process {}:{} -> consensus:{}", pid, src_port, consensus_port);
-                    
+                // First check for an active connection
+                if let Some(&consensus_port) = self.connections.get(&(pid, src_port)) {
+                    debug!("Found connection mapping: process {}:{} -> consensus:{}", pid, src_port, consensus_port);
                     if let Some(entry) = self.port_mappings.get_mut(&consensus_port) {
-                        debug!("Found port mapping entry, attempting to write {} bytes", data.len());
+                        debug!("Found connection entry, attempting to write {} bytes", data.len());
                         match entry.connection.write_all(&data) {
                             Ok(_) => {
-                                // Explicitly flush the connection
                                 if let Err(e) = entry.connection.flush() {
                                     error!("Failed to flush data to connection: {}", e);
                                     return Err(Box::new(e));
                                 }
-                                info!("Successfully sent and flushed {} bytes to destination", data.len());
+                                info!("Successfully sent and flushed {} bytes to connection", data.len());
                                 Ok(true)
                             }
                             Err(e) => {
-                                error!("Failed to send data to destination: {}", e);
+                                error!("Failed to send data to connection: {}", e);
+                                Err(Box::new(e))
+                            }
+                        }
+                    } else {
+                        error!("Inconsistent state: consensus port {} found but no mapping entry exists", consensus_port);
+                        Ok(false)
+                    }
+                }
+                // If no connection found, check for a listener
+                else if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
+                    debug!("Found listener mapping: process {}:{} -> consensus:{}", pid, src_port, consensus_port);
+                    if let Some(entry) = self.port_mappings.get_mut(&consensus_port) {
+                        debug!("Found listener entry, attempting to write {} bytes", data.len());
+                        match entry.connection.write_all(&data) {
+                            Ok(_) => {
+                                if let Err(e) = entry.connection.flush() {
+                                    error!("Failed to flush data to listener: {}", e);
+                                    return Err(Box::new(e));
+                                }
+                                info!("Successfully sent and flushed {} bytes to listener", data.len());
+                                Ok(true)
+                            }
+                            Err(e) => {
+                                error!("Failed to send data to listener: {}", e);
                                 Err(Box::new(e))
                             }
                         }
@@ -192,13 +219,23 @@ impl NatTable {
             }
             NetworkOperation::Close { src_port } => {
                 debug!("Processing close operation for process {}:{}", pid, src_port);
-                if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
+                
+                // First check if this is a connection
+                if let Some(&consensus_port) = self.connections.get(&(pid, src_port)) {
+                    self.port_mappings.remove(&consensus_port);
+                    self.connections.remove(&(pid, src_port));
+                    info!("Closed connection for {}:{}", pid, src_port);
+                    Ok(true)
+                }
+                // If not a connection, check if it's a listener
+                else if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
                     self.port_mappings.remove(&consensus_port);
                     self.process_ports.remove(&(pid, src_port));
-                    info!("Closed NAT entry for {}:{}", pid, src_port);
+                    self.listeners.remove(&consensus_port);
+                    info!("Closed listener for {}:{}", pid, src_port);
                     Ok(true)
                 } else {
-                    error!("No NAT mapping found to close for process {}:{}", pid, src_port);
+                    error!("No NAT mapping found for process {}:{}", pid, src_port);
                     Ok(false)
                 }
             }
@@ -226,30 +263,43 @@ impl NatTable {
     }
 
     pub fn check_for_incoming_data(&mut self) -> Vec<(u64, u16, Vec<u8>)> {
-        //debug!("Checking for incoming data on all NAT connections (total connections: {})", self.port_mappings.len());
         let mut messages = Vec::new();
         let mut to_remove = Vec::new();
 
         for (consensus_port, entry) in &mut self.port_mappings {
             let mut buf = [0u8; 1024];
-            //debug!("Checking for data on NAT port {}", consensus_port);
             match entry.connection.read(&mut buf) {
                 Ok(0) => {
                     info!("Connection closed by remote for {}:{}", entry.process_id, entry.process_port);
                     to_remove.push(*consensus_port);
                 }
                 Ok(n) => {
-                    info!("Received {} bytes from connection for process {}:{}: {:?}", 
-                         n, entry.process_id, entry.process_port, String::from_utf8_lossy(&buf[..n]));
-                    messages.push((
-                        entry.process_id,
-                        entry.process_port,
-                        buf[..n].to_vec()
-                    ));
+                    // Check if this is a connection or listener
+                    let is_connection = self.connections.contains_key(&(entry.process_id, entry.process_port));
+                    let is_listener = self.listeners.contains_key(consensus_port);
+                    
+                    if is_connection {
+                        info!("Received {} bytes from connection for process {}:{}: {:?}", 
+                             n, entry.process_id, entry.process_port, String::from_utf8_lossy(&buf[..n]));
+                        messages.push((
+                            entry.process_id,
+                            entry.process_port,
+                            buf[..n].to_vec()
+                        ));
+                    } else if is_listener {
+                        info!("Received {} bytes from listener for process {}:{}: {:?}", 
+                             n, entry.process_id, entry.process_port, String::from_utf8_lossy(&buf[..n]));
+                        messages.push((
+                            entry.process_id,
+                            entry.process_port,
+                            buf[..n].to_vec()
+                        ));
+                    } else {
+                        error!("Received data on unknown socket type for {}:{}", 
+                            entry.process_id, entry.process_port);
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No data available
-                    //debug!("No data available on NAT port {}", consensus_port);
                     continue;
                 }
                 Err(e) => {
@@ -263,7 +313,13 @@ impl NatTable {
         // Clean up closed connections
         for port in to_remove {
             if let Some(entry) = self.port_mappings.remove(&port) {
-                self.process_ports.remove(&(entry.process_id, entry.process_port));
+                // Remove from appropriate mapping
+                if self.connections.contains_key(&(entry.process_id, entry.process_port)) {
+                    self.connections.remove(&(entry.process_id, entry.process_port));
+                } else if self.listeners.contains_key(&port) {
+                    self.process_ports.remove(&(entry.process_id, entry.process_port));
+                    self.listeners.remove(&port);
+                }
                 info!("Removed NAT entry for {}:{}", entry.process_id, entry.process_port);
             }
         }

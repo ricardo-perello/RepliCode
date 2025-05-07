@@ -195,7 +195,7 @@ pub fn run_tcp_mode() -> io::Result<()> {
                         // Get source port before moving op
                         let src_port = match &op {
                             NetworkOperation::Listen { src_port } => *src_port,
-                            NetworkOperation::Accept { src_port } => *src_port,
+                            NetworkOperation::Accept { src_port, new_port: _ } => *src_port,
                             NetworkOperation::Connect { src_port, .. } => *src_port,
                             NetworkOperation::Send { src_port, .. } => *src_port,
                             NetworkOperation::Close { src_port } => *src_port,
