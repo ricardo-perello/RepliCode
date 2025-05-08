@@ -87,7 +87,9 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
         if wasm_bytes.starts_with(b"args:") {
             if let Some(null_pos) = wasm_bytes.iter().position(|&b| b == 0) {
                 let arg_str = String::from_utf8_lossy(&wasm_bytes[5..null_pos]);
+                // Split by the Unit Separator character
                 args = arg_str.split('\x1F').map(|s| s.to_string()).collect();
+                debug!("Process {} received args: {:?}", id, args);
                 wasm_bytes = wasm_bytes[null_pos+1..].to_vec();
             } else {
                 break;

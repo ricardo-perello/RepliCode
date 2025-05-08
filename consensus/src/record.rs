@@ -24,7 +24,7 @@ pub fn write_record(cmd: &Command) -> io::Result<Vec<u8>> {
             
             // Add arguments if present, using a safe format
             if !args.is_empty() {
-                // Join args with a special separator that's unlikely to appear in the args
+                // Split the arguments more sensibly
                 let args_str = args.join("\x1F"); // Use Unit Separator as delimiter
                 payload.extend(format!("args:{}", args_str).as_bytes());
                 payload.push(0); // Null terminator between args and wasm
