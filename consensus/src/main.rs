@@ -4,6 +4,7 @@ mod modes;
 mod nat;
 mod test_server;
 mod test_client;
+mod netcat_client;
 
 use std::env;
 use std::io;
@@ -46,6 +47,10 @@ fn main() -> io::Result<()> {
         "test-server" => test_server::start_test_server(),
         "test-client" => {
             test_client::start_test_client()?;
+            Ok(())
+        },
+        "netcat-client" => {
+            netcat_client::start_netcat_client()?;
             Ok(())
         },
         _ => {

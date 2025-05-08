@@ -63,6 +63,7 @@ pub struct ProcessData {
     pub next_port: Arc<Mutex<u16>>,
     pub network_queue: Arc<Mutex<Vec<OutgoingNetworkMessage>>>,
     pub nat_table: Arc<Mutex<NatTable>>,
+    pub args: Vec<String>,
 }
 
 pub struct Process {
@@ -78,19 +79,31 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
     let engine = Engine::new(&config)?;
     debug!("WASM engine created");
 
-    // Check if the payload contains a directory path
-    let (wasm_bytes, preload_dir) = if let Some(dir_start) = wasm_bytes.iter().position(|&b| b == 0) {
-        let dir_str = String::from_utf8_lossy(&wasm_bytes[..dir_start]);
-        if dir_str.starts_with("dir:") {
-            let dir_path = &dir_str[4..];
-            let wasm_data = wasm_bytes[dir_start + 1..].to_vec();
-            (wasm_data, Some(PathBuf::from(dir_path)))
+    let mut args = Vec::new();
+    let mut wasm_bytes = wasm_bytes;
+    let mut preload_dir = None;
+    // Parse args and dir from the start of wasm_bytes
+    loop {
+        if wasm_bytes.starts_with(b"args:") {
+            if let Some(null_pos) = wasm_bytes.iter().position(|&b| b == 0) {
+                let arg_str = String::from_utf8_lossy(&wasm_bytes[5..null_pos]);
+                args = arg_str.split(',').map(|s| s.to_string()).collect();
+                wasm_bytes = wasm_bytes[null_pos+1..].to_vec();
+            } else {
+                break;
+            }
+        } else if wasm_bytes.starts_with(b"dir:") {
+            if let Some(null_pos) = wasm_bytes.iter().position(|&b| b == 0) {
+                let dir_str = String::from_utf8_lossy(&wasm_bytes[4..null_pos]);
+                preload_dir = Some(PathBuf::from(dir_str.to_string()));
+                wasm_bytes = wasm_bytes[null_pos+1..].to_vec();
+            } else {
+                break;
+            }
         } else {
-            (wasm_bytes, None)
+            break;
         }
-    } else {
-        (wasm_bytes, None)
-    };
+    }
 
     // Load the module from the in-memory bytes.
     let module = Module::new(&engine, &wasm_bytes)?;
@@ -153,6 +166,7 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
         next_port: Arc::new(Mutex::new(0)),
         network_queue: Arc::new(Mutex::new(Vec::new())),
         nat_table: Arc::new(Mutex::new(NatTable::new())),
+        args,
     };
 
     let thread_data = process_data.clone();
@@ -218,6 +232,7 @@ pub fn start_process(
     id: u64,
     preload_dir: Option<&Path>,
     max_disk_bytes: u64,
+    args: Vec<String>,
 ) -> Result<Process> {
     debug!("Starting process with path: {:?} and id: {}", wasm_path, id);
     let mut config = wasmtime::Config::new();
@@ -287,6 +302,7 @@ pub fn start_process(
         next_port: Arc::new(Mutex::new(0)),
         network_queue: Arc::new(Mutex::new(Vec::new())),
         nat_table: Arc::new(Mutex::new(NatTable::new())),
+        args,
     };
 
     let process_data_clone = process_data.clone();
