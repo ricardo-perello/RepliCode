@@ -21,6 +21,7 @@ pub enum NetworkOperation {
     },
     Accept {
         src_port: u16,
+        new_port: u16,  // Port for the new accepted connection
     }
 }
 

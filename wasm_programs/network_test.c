@@ -16,6 +16,10 @@ __attribute__((import_name("sock_send")))
 int sock_send(int sock_fd, const void* si_data, int si_data_len, int si_flags, int* ret_data_len);
 
 __attribute__((import_module("wasi_snapshot_preview1")))
+__attribute__((import_name("sock_recv")))
+int sock_recv(int sock_fd, void* ri_data, int ri_data_len, int ri_flags, int* ro_datalen, int* ro_flags);
+
+__attribute__((import_module("wasi_snapshot_preview1")))
 __attribute__((import_name("sock_shutdown")))
 int sock_shutdown(int sock_fd, int how);
 
@@ -54,7 +58,17 @@ int main() {
         printf("Failed to send message\n");
         return 1;
     }
-    printf("Message sent successfully, %d bytes sent\n", bytes_sent);
+    printf("Message sent successfully, %d bytes sent\n", bytes_sent);  
+
+    // Read response
+    char buffer[1024];
+    int bytes_received;
+    ret = sock_recv(sock_fd, buffer, sizeof(buffer), 0, &bytes_received, NULL);
+    if (ret != 0) {
+        printf("Failed to receive response\n");
+        return 1;
+    }
+    printf("Received %d bytes: %.*s\n", bytes_received, bytes_received, buffer);
 
     // Shutdown the socket (SHUT_RDWR = 3)
     ret = sock_shutdown(sock_fd, 3);

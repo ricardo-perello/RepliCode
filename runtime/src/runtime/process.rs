@@ -5,6 +5,7 @@ use std::{
 };
 use wasmtime::{Engine, Module, Store, Linker};
 use crate::wasi_syscalls::net::OutgoingNetworkMessage;
+use consensus::nat::NatTable;
 
 use crate::{
     runtime::fd_table::{FDEntry, FDTable},
@@ -61,6 +62,7 @@ pub struct ProcessData {
     pub id: u64,
     pub next_port: Arc<Mutex<u16>>,
     pub network_queue: Arc<Mutex<Vec<OutgoingNetworkMessage>>>,
+    pub nat_table: Arc<Mutex<NatTable>>,
 }
 
 pub struct Process {
@@ -151,6 +153,7 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
         id,
         next_port: Arc::new(Mutex::new(0)),
         network_queue: Arc::new(Mutex::new(Vec::new())),
+        nat_table: Arc::new(Mutex::new(NatTable::new())),
     };
 
     let thread_data = process_data.clone();
@@ -284,6 +287,7 @@ pub fn start_process(
         id,
         next_port: Arc::new(Mutex::new(0)),
         network_queue: Arc::new(Mutex::new(Vec::new())),
+        nat_table: Arc::new(Mutex::new(NatTable::new())),
     };
 
     let process_data_clone = process_data.clone();

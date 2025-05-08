@@ -108,6 +108,123 @@ This executes `hello.wasm` inside the RepliCode runtime.
 
 ---
 
+## **Networking & Socket Implementation**
+
+### **Network Architecture**
+RepliCode implements a deterministic networking layer that ensures consistent behavior across all nodes. The system uses a NAT (Network Address Translation) table to manage connections and port mappings.
+
+#### **Key Components**
+- **NAT Table**: Manages port mappings and connection state
+- **Socket Operations**: Implements WASI socket functions
+- **Network Batching**: Handles message batching for consensus
+- **Process Isolation**: Each process has its own network namespace
+
+### **Socket Functions**
+The runtime implements the following WASI socket functions:
+
+#### **Socket Creation & Management**
+```rust
+wasi_sock_open(domain, socktype, protocol) -> fd
+wasi_sock_close(fd) -> status
+wasi_sock_shutdown(fd, how) -> status
+```
+
+#### **Connection Operations**
+```rust
+wasi_sock_listen(fd, backlog) -> status
+wasi_sock_accept(fd, flags) -> new_fd
+wasi_sock_connect(fd, addr, addr_len) -> status
+```
+
+#### **Data Transfer**
+```rust
+wasi_sock_send(fd, data, flags) -> bytes_sent
+wasi_sock_recv(fd, buffer, flags) -> bytes_received
+```
+
+### **NAT Table Implementation**
+The NAT table (`NatTable`) manages:
+- Port mappings between processes
+- Pending accept operations
+- Connection state tracking
+- Network operation queuing
+
+```rust
+struct NatTable {
+    port_mappings: HashMap<(u64, u16), u16>,  // (pid, src_port) -> consensus_port
+    process_ports: HashMap<(u64, u16), u16>,  // (pid, src_port) -> consensus_port
+    listeners: HashMap<(u64, u16), NatListener>,
+    pending_accepts: HashMap<(u64, u16), bool>,
+}
+```
+
+### **Network Operation Flow**
+1. **Socket Creation**
+   - Process requests new socket via `wasi_sock_open`
+   - Runtime allocates local port and FD
+   - Socket starts in unconnected state
+
+2. **Listening**
+   - Process calls `wasi_sock_listen`
+   - Runtime marks socket as listener
+   - NAT table creates port mapping
+
+3. **Accepting Connections**
+   - Process calls `wasi_sock_accept`
+   - Runtime preallocates new FD and port for the connection
+   - If accept succeeds:
+     - New socket is created with preallocated port
+     - Connection is established
+   - If accept fails:
+     - Preallocated FD is freed
+     - Port counter is reverted
+     - Returns EAGAIN for retry
+
+4. **Sending Data**
+   - Process calls `wasi_sock_send`
+   - Runtime queues operation
+   - Consensus processes and routes data
+
+5. **Receiving Data**
+   - Data arrives via consensus
+   - Runtime routes to correct socket based on port mapping
+   - Process reads via `wasi_sock_recv`
+
+### **Port Management**
+The system implements deterministic port allocation:
+- Each process maintains its own port counter
+- Ports are preallocated for accept operations
+- Failed accepts trigger port counter reversion
+- Port mappings ensure consistent routing across nodes
+
+### **Message Batching**
+The system uses a batching mechanism for network operations:
+
+1. **Outgoing Messages**
+   - Network operations are queued
+   - Batched with other operations
+   - Sent to consensus in batches
+
+2. **Incoming Messages**
+   - Consensus sends batched responses
+   - Runtime processes each message
+   - Updates appropriate socket buffers
+
+### **Error Handling**
+Common error codes:
+- `EINVAL` (1): Invalid arguments
+- `EAGAIN` (11): Resource temporarily unavailable
+- `EMFILE` (76): Too many open files
+
+### **Deterministic Execution**
+The networking layer ensures determinism by:
+- Consistent port allocation
+- Ordered message processing
+- Synchronized state updates
+- Atomic operation handling
+
+---
+
 ## **Contributing**
 RepliCode is under active development. Contributions in system architecture, Rust development, and deterministic execution research are welcome. Open an issue or submit a pull request.  
 

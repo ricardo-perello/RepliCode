@@ -50,22 +50,31 @@ int main() {
         return 1;
     }
     printf("Server listening on port 7000\n");
-
-    // Accept a connection
-    ret = sock_accept(server_fd, 0, &client_fd);
-    if (ret != 0) {
-        printf("Failed to accept connection\n");
-        return 1;
+    fflush(stdout);
+    // Accept a connection with retry loop
+    while (1) {
+        ret = sock_accept(server_fd, 0, &client_fd);
+        if (ret == 0) {
+            // Successfully accepted a connection
+            break;
+        } else if (ret == 11) { // EAGAIN
+            // No connection available yet, retry
+            continue;
+        } else {
+            // Some other error occurred
+            printf("Failed to accept connection (error: %d)\n", ret);
+            return 1;
+        }
     }
     printf("Accepted connection with client fd: %d\n", client_fd);
 
-    // // Receive data from client
-    // ret = sock_recv(client_fd, buffer, sizeof(buffer), 0, &bytes_received, NULL);
-    // if (ret != 0) {
-    //     printf("Failed to receive data\n");
-    //     return 1;
-    // }
-    // printf("Received %d bytes: %.*s\n", bytes_received, bytes_received, buffer);
+    // Receive data from client
+    ret = sock_recv(client_fd, buffer, sizeof(buffer), 0, &bytes_received, NULL);
+    if (ret != 0) {
+        printf("Failed to receive data\n");
+        return 1;
+    }
+    printf("Received %d bytes: %.*s\n", bytes_received, bytes_received, buffer);
 
     // Echo back to client
     char* message = "Hello, client!";

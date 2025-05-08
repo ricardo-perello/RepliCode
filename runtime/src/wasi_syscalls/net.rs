@@ -10,8 +10,6 @@ pub struct OutgoingNetworkMessage {
     pub operation: NetworkOperation,
 }
 
-//TODO dummy version, need to talk to gauthier to ensure how it goes through consensus
-
 
 pub fn wasi_sock_open(
     mut caller: Caller<'_, ProcessData>,
@@ -59,6 +57,8 @@ pub fn wasi_sock_open(
         table.entries[fd as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
             local_port: src_port,
             connected: false,
+            is_listener: false,  // New sockets start as non-listeners
+            buffer: Vec::new(),
         });
         info!("Created socket FD {} for process {}:{}", fd, pid, src_port);
     }
@@ -235,7 +235,28 @@ pub fn wasi_sock_listen(
     // Block until consensus processes this
     debug!("Blocking process {} for network operation", pid);
     block_process_for_network(&mut caller);
-    0 // Success
+
+    // Check if the listen operation succeeded by verifying the NAT mapping exists
+    let listen_succeeded = {
+        let process_data = caller.data();
+        process_data.nat_table.lock().unwrap().has_port_mapping(pid, src_port)
+    };
+
+    if listen_succeeded {
+        // Mark the socket as a listener
+        {
+            let process_data = caller.data();
+            let mut table = process_data.fd_table.lock().unwrap();
+            if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { is_listener, .. })) = table.entries.get_mut(fd as usize) {
+                *is_listener = true;
+            }
+        }
+        info!("Listen operation succeeded for process {}:{}", pid, src_port);
+        0 // Success
+    } else {
+        error!("Listen operation failed for process {}:{}", pid, src_port);
+        1 // EINVAL - Invalid argument
+    }
 }
 
 pub fn wasi_sock_accept(
@@ -261,93 +282,164 @@ pub fn wasi_sock_accept(
         }
     }
     
-    // Keep trying to accept until we get a connection
-    loop {
-        // Queue the accept operation
-        {
-            let process_data = caller.data();
-            let op = NetworkOperation::Accept {
-                src_port,
-            };
-            
-            process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
-                pid,
-                operation: op,
-            });
-            info!("Queued accept operation for process {}:{}", pid, src_port);
+    // Preallocate FD and port for the accepted connection
+    let (new_fd, new_port) = {
+        let process_data = caller.data();
+        let mut table = process_data.fd_table.lock().unwrap();
+        let new_fd = table.allocate_fd();
+        if new_fd < 0 {
+            error!("No free file descriptors available for accepted connection");
+            return 76; // EMFILE
         }
-        
-        // Block until consensus processes this and returns a new connection
-        debug!("Blocking process {} for network operation", pid);
-        block_process_for_network(&mut caller);
-        
-        // Check if we got a connection and create new FD if we did
-        let (got_connection, new_fd) = {
-            let process_data = caller.data();
-            let table = process_data.fd_table.lock().unwrap();
-            if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { connected, .. })) = table.entries.get(fd as usize) {
-                if *connected {
-                    // We got a connection, create the new FD
-                    let mut table = process_data.fd_table.lock().unwrap();
-                    let new_fd = table.allocate_fd();
-                    if new_fd < 0 {
-                        error!("No free file descriptors available for accepted connection");
-                        return 76; // EMFILE
-                    }
-                    
-                    // Create a new socket FD entry for the accepted connection
-                    table.entries[new_fd as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
-                        local_port: src_port,
-                        connected: true,
-                    });
-                    
-                    (true, new_fd)
-                } else {
-                    (false, 0)
-                }
-            } else {
-                (false, 0)
-            }
+        let new_port = {
+            let mut port = process_data.next_port.lock().unwrap();
+            *port += 1;
+            *port
+        };
+        table.entries[new_fd as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
+            local_port: new_port,
+            connected: true,
+            is_listener: false,  // Accepted connections are never listeners
+            buffer: Vec::new(),
+        });
+        (new_fd, new_port)
+    };
+    
+    // Queue the accept operation with the preallocated port
+    {
+        let process_data = caller.data();
+        let op = NetworkOperation::Accept {
+            src_port,
+            new_port,
         };
         
-        if got_connection {
-            // Write the new FD back to WASM memory
-            let memory = match caller.get_export("memory") {
-                Some(wasmtime::Extern::Memory(mem)) => mem,
-                _ => {
-                    error!("sock_accept: no memory export found");
-                    return 1; // EINVAL
-                }
-            };
-            let mem_mut = memory.data_mut(&mut caller);
-            let out_ptr = fd_out as usize;
-            if out_ptr + 4 > mem_mut.len() {
-                error!("sock_accept: fd_out pointer out of bounds");
+        process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
+            pid,
+            operation: op,
+        });
+        info!("Queued accept operation for process {}:{} -> new port {}", pid, src_port, new_port);
+    }
+    
+    // Block until consensus processes this
+    debug!("Blocking process {} for network operation", pid);
+    block_process_for_network(&mut caller);
+    
+    // Check if we got a connection
+    let has_connection = {
+        let process_data = caller.data();
+        process_data.nat_table.lock().unwrap().has_pending_accept(pid, src_port)
+    };
+
+    if has_connection {
+        // Write the new FD back to WASM memory
+        let memory = match caller.get_export("memory") {
+            Some(wasmtime::Extern::Memory(mem)) => mem,
+            _ => {
+                error!("sock_accept: no memory export found");
                 return 1; // EINVAL
             }
-            mem_mut[out_ptr..out_ptr+4].copy_from_slice(&(new_fd as u32).to_le_bytes());
-            info!("Created new socket FD {} for accepted connection on process {}:{}", new_fd, pid, src_port);
-            
-            return 0; // Success
+        };
+        let mem_mut = memory.data_mut(&mut caller);
+        let out_ptr = fd_out as usize;
+        if out_ptr + 4 > mem_mut.len() {
+            error!("sock_accept: fd_out pointer out of bounds");
+            return 1; // EINVAL
         }
-        
-        // No connection available yet, try again
-        debug!("No connection available yet for process {}:{}, retrying...", pid, src_port);
+        mem_mut[out_ptr..out_ptr+4].copy_from_slice(&(new_fd as u32).to_le_bytes());
+
+        // Clear the pending accept
+        {
+            let process_data = caller.data();
+            process_data.nat_table.lock().unwrap().clear_pending_accept(pid, src_port);
+        }
+
+        info!("Created new socket FD {} for accepted connection on process {}:{} -> {}", new_fd, pid, src_port, new_port);
+        0 // Success
+    } else {
+        // Revert the port allocation and FD
+        {
+            let process_data = caller.data();
+            let mut table = process_data.fd_table.lock().unwrap();
+            table.entries[new_fd as usize] = None;  // Free the FD
+            let mut port = process_data.next_port.lock().unwrap();
+            *port -= 1;  // Revert the port counter
+        }
+        debug!("No connection available yet for process {}:{}, will retry", pid, src_port);
+        11 // EAGAIN - Resource temporarily unavailable
     }
 }
 
 pub fn wasi_sock_recv(
-    caller: Caller<ProcessData>,
+    mut caller: Caller<'_, ProcessData>,
     fd: u32,
     ri_data_ptr: u32,
     ri_data_len: u32,
     ri_flags: u32,
     ro_datalen_ptr: u32,
     ro_flags_ptr: u32,
-) -> Result<u32> {
-    info!("wasi_sock_recv: fd={}, ri_data_ptr={}, ri_data_len={}, ri_flags={}, ro_datalen_ptr={}, ro_flags_ptr={}", 
+) -> i32 {
+    debug!("wasi_sock_recv: fd={}, ri_data_ptr={}, ri_data_len={}, ri_flags={}, ro_datalen_ptr={}, ro_flags_ptr={}", 
         fd, ri_data_ptr, ri_data_len, ri_flags, ro_datalen_ptr, ro_flags_ptr);
-    Ok(0)
+    
+    let pid;
+    let src_port;
+    let data;
+    
+    // Get socket FD entry and data
+    {
+        let process_data = caller.data();
+        pid = process_data.id;
+        let mut table = process_data.fd_table.lock().unwrap();
+        if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, buffer, .. })) = table.entries.get_mut(fd as usize) {
+            src_port = *local_port;
+            if buffer.is_empty() {
+                debug!("No data available for socket {}:{}", pid, src_port);
+                return 11; // EAGAIN
+            }
+            data = buffer.drain(..).collect::<Vec<u8>>();
+        } else {
+            error!("Invalid socket FD {} for process {}", fd, pid);
+            return 1; // EINVAL
+        }
+    }
+
+    // Get the memory to write data to
+    let memory = match caller.get_export("memory") {
+        Some(wasmtime::Extern::Memory(mem)) => mem,
+        _ => {
+            error!("sock_recv: no memory export found");
+            return 1; // EINVAL
+        }
+    };
+    let mem_mut = memory.data_mut(&mut caller);
+
+    // Write data to memory
+    let data_len = data.len().min(ri_data_len as usize);
+    let out_ptr = ri_data_ptr as usize;
+    if out_ptr + data_len > mem_mut.len() {
+        error!("sock_recv: data pointer out of bounds");
+        return 1; // EINVAL
+    }
+    mem_mut[out_ptr..out_ptr + data_len].copy_from_slice(&data[..data_len]);
+
+    // Write data length back to memory
+    let len_ptr = ro_datalen_ptr as usize;
+    if len_ptr + 4 > mem_mut.len() {
+        error!("sock_recv: length pointer out of bounds");
+        return 1; // EINVAL
+    }
+    mem_mut[len_ptr..len_ptr + 4].copy_from_slice(&(data_len as u32).to_le_bytes());
+
+    // Write flags back to memory (0 for now)
+    let flags_ptr = ro_flags_ptr as usize;
+    if flags_ptr + 4 > mem_mut.len() {
+        error!("sock_recv: flags pointer out of bounds");
+        return 1; // EINVAL
+    }
+    mem_mut[flags_ptr..flags_ptr + 4].copy_from_slice(&0u32.to_le_bytes());
+
+    info!("Read {} bytes from socket {}:{}", data_len, pid, src_port);
+    0 // Success
 }
 
 pub fn wasi_sock_shutdown(

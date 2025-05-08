@@ -7,7 +7,7 @@ pub fn start_test_client() -> io::Result<()> {
     info!("Starting test client");
     
     // Connect to the NAT-mapped port
-    let mut stream = TcpStream::connect("127.0.0.1:10001")?;
+    let mut stream = TcpStream::connect("127.0.0.1:10000")?;
     info!("Connected to test server");
 
     // Send a test message

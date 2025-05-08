@@ -357,7 +357,12 @@ pub fn wasi_poll_oneoff(
 }
 
 /// Implementation for proc_exit: logs and terminates the process.
-pub fn wasi_proc_exit(_caller: Caller<'_, ProcessData>, code: i32) -> () {
+pub fn wasi_proc_exit(caller: Caller<'_, ProcessData>, code: i32) -> () {
     info!("Called proc_exit with code: {}", code);
-    std::process::exit(code);
-}
+    {
+        let mut st = caller.data().state.lock().unwrap();
+        *st = ProcessState::Finished;
+    }
+    caller.data().cond.notify_all();
+    panic!("Process exited with code {}", code)
+}   
