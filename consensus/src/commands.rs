@@ -89,16 +89,18 @@ pub fn parse_command(line: &str) -> Option<Command> {
                     },
                     "-a" => {
                         if i + 1 < tokens.len() {
-                            // Take everything after -a as a single string and split it
                             let args_str = tokens[i + 1];
-                            // Remove surrounding quotes if present
-                            let args_str = args_str.trim_matches(|c| c == '"' || c == '\'');
-                            args = args_str.split_whitespace()
-                                .map(|s| s.to_string())
-                                .collect();
+                            // Check if the argument is properly quoted
+                            if !args_str.starts_with('"') || !args_str.ends_with('"') {
+                                error!("Arguments after -a must be enclosed in double quotes. Example: -a \"-l -p 8080\"");
+                                return None;
+                            }
+                            // Remove the quotes and add as a single argument
+                            let args_str = args_str[1..args_str.len()-1].to_string();
+                            args.push(args_str);
                             i += 2;
                         } else {
-                            error!("-a flag requires arguments");
+                            error!("-a flag requires arguments in quotes. Example: -a \"-l -p 8080\"");
                             return None;
                         }
                     },
