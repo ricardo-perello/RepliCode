@@ -13,13 +13,23 @@ pub fn write_record(cmd: &Command) -> io::Result<Vec<u8>> {
             // Type 0; payload is "clock:<delta>"
             (0u8, 0u64, format!("clock:{}", delta).as_bytes().to_vec())
         },
-        Command::Init(wasm_bytes, dir_path) => {
-            // For Init, we'll prepend the directory path if present
+        Command::Init { wasm_bytes, dir_path, args } => {
             let mut payload = Vec::new();
+            
+            // Add directory if present
             if let Some(dir) = dir_path {
                 payload.extend(format!("dir:{}", dir).as_bytes());
-                payload.push(0); // Null terminator between dir and wasm //TODO: Make sure this wont cause issues with the wasm file data
+                payload.push(0); // Null terminator between dir and args
             }
+            
+            // Add arguments if present, using a safe format
+            if !args.is_empty() {
+                // Join args with a special separator that's unlikely to appear in the args
+                let args_str = args.join("\x1F"); // Use Unit Separator as delimiter
+                payload.extend(format!("args:{}", args_str).as_bytes());
+                payload.push(0); // Null terminator between args and wasm
+            }
+            
             payload.extend(wasm_bytes);
             (2u8, u64::MAX, payload)
         },

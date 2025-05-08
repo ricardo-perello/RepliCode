@@ -75,7 +75,6 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
     debug!("Starting process {} from WASM bytes", id);
     let mut config = wasmtime::Config::new();
     debug!("WASM config created");
-    config.consume_fuel(true);
     let engine = Engine::new(&config)?;
     debug!("WASM engine created");
 

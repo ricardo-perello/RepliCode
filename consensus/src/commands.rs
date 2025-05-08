@@ -29,7 +29,11 @@ pub enum NetworkOperation {
 #[derive(Clone, Debug)]
 pub enum Command {
     Clock(u64),
-    Init(Vec<u8>, Option<String>),
+    Init {
+        wasm_bytes: Vec<u8>,
+        dir_path: Option<String>,
+        args: Vec<String>
+    },
     FDMsg(u64, Vec<u8>),
     NetworkIn(u64, u16, Vec<u8>),  // pid, dest_port, data
     NetworkOut(u64, NetworkOperation), // pid, operation
@@ -42,9 +46,10 @@ pub fn read_wasm_file(file_path: &str) -> Vec<u8> {
         Vec::new()
     })
 }
+
 /// Parse a text command into a high-level Command.
 /// Supported commands:
-///   - init <wasm_file> [directory]
+///   - init <wasm_file> [-d directory] [-a 'arg1 arg2 ...']
 ///   - msg <pid> <message>
 ///   - ftp <pid> <ftp_command>
 ///   - clock <nanoseconds>
@@ -59,23 +64,52 @@ pub fn parse_command(line: &str) -> Option<Command> {
     }
     match tokens[0].to_lowercase().as_str() {
         "init" => {
-            // "init <wasm_file> [directory]"
-            let file_path = if tokens.len() >= 2 {
-                tokens[1].to_string()
-            } else {
-                eprint!("Enter WASM file path: ");
-                std::io::stderr().flush().ok()?;
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input).ok()?;
-                input.trim().to_string()
-            };
+            if tokens.len() < 2 {
+                error!("Usage: init <wasm_file> [-d directory] [-a 'arg1 arg2 ...']");
+                return None;
+            }
+            
+            let file_path = tokens[1].to_string();
             let wasm_bytes = read_wasm_file(&file_path);
-            let dir_path = if tokens.len() >= 3 {
-                Some(tokens[2].to_string())
-            } else {
-                None
-            };
-            Some(Command::Init(wasm_bytes, dir_path))
+            
+            let mut dir_path = None;
+            let mut args = Vec::new();
+            let mut i = 2;
+            
+            while i < tokens.len() {
+                match tokens[i] {
+                    "-d" => {
+                        if i + 1 < tokens.len() {
+                            dir_path = Some(tokens[i + 1].to_string());
+                            i += 2;
+                        } else {
+                            error!("-d flag requires a directory path");
+                            return None;
+                        }
+                    },
+                    "-a" => {
+                        if i + 1 < tokens.len() {
+                            // Take everything after -a as a single string and split it
+                            let args_str = tokens[i + 1];
+                            // Remove surrounding quotes if present
+                            let args_str = args_str.trim_matches(|c| c == '"' || c == '\'');
+                            args = args_str.split_whitespace()
+                                .map(|s| s.to_string())
+                                .collect();
+                            i += 2;
+                        } else {
+                            error!("-a flag requires arguments");
+                            return None;
+                        }
+                    },
+                    _ => {
+                        error!("Unknown flag: {}", tokens[i]);
+                        return None;
+                    }
+                }
+            }
+            
+            Some(Command::Init { wasm_bytes, dir_path, args })
         },
         "msg" => {
             // "msg <pid> <message>"
