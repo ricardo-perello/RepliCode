@@ -33,6 +33,7 @@ __attribute__((import_name("sock_accept")))
 int sock_accept(int sock_fd, int flags, int* conn_fd_out);
 
 #define BUF_SIZE 4096
+#define OUTPUT_FILE "netcat_output.txt"
 
 void usage() {
     fprintf(stderr, "Usage: netcat [-l] <port> or netcat <host> <port>\n");
@@ -91,6 +92,7 @@ int main(int argc, char *argv[]) {
     char buf[BUF_SIZE];
     int n, sent, received;
     int done = 0;
+    FILE *output_file = NULL;
 
     // Open a socket (AF_INET=2, SOCK_STREAM=1)
     ret = sock_open(2, 1, 0, &sockfd);
@@ -102,6 +104,14 @@ int main(int argc, char *argv[]) {
     if (is_server) {
         // Server mode
         printf("Starting server on port %d\n", port);
+        
+        // Open output file for writing
+        output_file = fopen(OUTPUT_FILE, "w");
+        if (output_file == NULL) {
+            printf("Failed to open output file for writing\n");
+            return 1;
+        }
+        printf("Writing received data to %s\n", OUTPUT_FILE);
         
         // Listen on the port (binding happens automatically)
         ret = sock_listen(sockfd, 5);
@@ -138,8 +148,13 @@ int main(int argc, char *argv[]) {
             // Read from socket
             ret = sock_recv(clientfd, buf, BUF_SIZE, 0, &received, NULL);
             if (ret == 0 && received > 0) {
+                // Write to stdout
                 fwrite(buf, 1, received, stdout);
                 fflush(stdout);
+                
+                // Also write to file
+                fwrite(buf, 1, received, output_file);
+                fflush(output_file);
             } else if (received == 0) {
                 printf("Client disconnected\n");
                 done = 1;
@@ -157,6 +172,11 @@ int main(int argc, char *argv[]) {
                 sock_shutdown(clientfd, 1); // SHUT_WR
                 done = 1;
             }
+        }
+        
+        if (output_file != NULL) {
+            fclose(output_file);
+            printf("Output file closed\n");
         }
         
         sock_shutdown(clientfd, 3); // SHUT_RDWR
