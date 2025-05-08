@@ -3,12 +3,13 @@ use std::fs::{OpenOptions, File, create_dir_all};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use std::path::{Path, PathBuf};
 use log::{error, info, debug, warn};
 use bincode;
 use chrono::Utc;
 use std::sync::mpsc;
+use byteorder::{WriteBytesExt, ReadBytesExt, LittleEndian};
 
 // use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
@@ -109,62 +110,70 @@ struct RuntimeConnection {
     address: String,
 }
 
-/// Write batch data to a timestamped file
-fn write_batch_to_file(batch: &[u8]) -> io::Result<PathBuf> {
-    // Create batches directory if it doesn't exist
-    let batch_dir = Path::new("batches");
-    if !batch_dir.exists() {
-        create_dir_all(batch_dir)?;
-    }
-
-    // Create a file with timestamp in name
+/// Global session file path
+fn get_session_file_path() -> PathBuf {
     let now = Utc::now();
-    let filename = format!("batch-{}.bin", now.format("%Y%m%dT%H%M%S%.3f"));
-    let path = batch_dir.join(&filename);
-    
-    // Write batch data to file
-    let mut file = File::create(&path)?;
-    file.write_all(batch)?;
-    
-    info!("Batch written to file: {}", path.display());
-    Ok(path)
-}
-
-/// Reads all batch files and returns them in chronological order
-fn read_all_batch_files() -> io::Result<Vec<(PathBuf, Vec<u8>)>> {
-    let batch_dir = Path::new("batches");
-    if !batch_dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut batch_files: Vec<(PathBuf, SystemTime)> = Vec::new();
-    
-    // Collect all batch files with their modification times
-    for entry in std::fs::read_dir(batch_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        
-        if path.is_file() && 
-           path.extension().map_or(false, |ext| ext == "bin") && 
-           path.file_name().map_or(false, |name| name.to_string_lossy().starts_with("batch-")) {
-            if let Ok(metadata) = entry.metadata() {
-                if let Ok(modified) = metadata.modified() {
-                    batch_files.push((path, modified));
-                }
-            }
+    let batches_dir = Path::new("batches");
+    if !batches_dir.exists() {
+        if let Err(e) = create_dir_all(batches_dir) {
+            error!("Failed to create batches directory: {}", e);
         }
     }
     
-    // Sort by modification time (oldest first)
-    batch_files.sort_by_key(|&(_, time)| time);
+    batches_dir.join(format!("session-{}.bin", now.format("%Y%m%dT%H%M%S")))
+}
+
+/// Opens or creates the session file for appending
+fn open_session_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+}
+
+/// Appends a batch to the session file
+/// Format: [batch_size: u32][batch_data: [u8; batch_size]]
+fn write_batch_to_file(batch: &[u8], session_file: &mut File) -> io::Result<()> {
+    // Write batch size as a 4-byte header
+    session_file.write_u32::<LittleEndian>(batch.len() as u32)?;
     
-    // Read the contents of each file
-    let mut batches = Vec::new();
-    for (path, _) in batch_files {
-        let data = std::fs::read(&path)?;
-        batches.push((path.clone(), data));
+    // Write the batch data
+    session_file.write_all(batch)?;
+    
+    // Flush to ensure data is written to disk
+    session_file.flush()?;
+    
+    debug!("Batch of {} bytes appended to session file", batch.len());
+    Ok(())
+}
+
+/// Reads all batches from the session file
+fn read_all_batches(session_file_path: &Path) -> io::Result<Vec<Vec<u8>>> {
+    // Check if file exists
+    if !session_file_path.exists() {
+        return Ok(Vec::new());
     }
     
+    let mut file = File::open(session_file_path)?;
+    let mut batches = Vec::new();
+    
+    // Read until end of file
+    while let Ok(batch_size) = file.read_u32::<LittleEndian>() {
+        // Read the batch data
+        let mut batch = vec![0u8; batch_size as usize];
+        if let Err(e) = file.read_exact(&mut batch) {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                // End of file reached while reading batch - file may be corrupted
+                warn!("Unexpected end of file while reading batch. File may be corrupted.");
+                break;
+            }
+            return Err(e);
+        }
+        
+        batches.push(batch);
+    }
+    
+    debug!("Read {} batches from session file", batches.len());
     Ok(batches)
 }
 
@@ -176,11 +185,13 @@ pub fn run_tcp_mode() -> io::Result<()> {
     // Set to non-blocking mode so we can accept connections without blocking
     listener.set_nonblocking(true)?;
     
-    // Create the batches directory if it doesn't exist
-    let batch_dir = Path::new("batches");
-    if !batch_dir.exists() {
-        create_dir_all(batch_dir)?;
-    }
+    // Create the batches directory and session file
+    let session_file_path = get_session_file_path();
+    let session_file = open_session_file(&session_file_path)?;
+    info!("Created session file: {}", session_file_path.display());
+    
+    // Shared reference to the session file path
+    let session_file_path = Arc::new(session_file_path);
     
     // Shared state for runtime connections
     let runtimes: Arc<Mutex<Vec<RuntimeConnection>>> = Arc::new(Mutex::new(Vec::new()));
@@ -197,6 +208,7 @@ pub fn run_tcp_mode() -> io::Result<()> {
     // Clone for use in the listener thread
     let runtimes_listener = Arc::clone(&runtimes);
     let shared_buffer_listener = Arc::clone(&shared_buffer);
+    let session_file_path_listener = Arc::clone(&session_file_path);
     
     // Spawn a thread to accept new connections
     thread::spawn(move || {
@@ -217,21 +229,19 @@ pub fn run_tcp_mode() -> io::Result<()> {
                     };
                     
                     // Send all existing batches to the new runtime
-                    let batches = match read_all_batch_files() {
-                        Ok(batches) => batches,
-                        Err(e) => {
-                            error!("Failed to read batch files: {}", e);
-                            Vec::new()
+                    match read_all_batches(&session_file_path_listener) {
+                        Ok(batches) => {
+                            info!("Sending {} existing batches to new runtime at {}", batches.len(), addr);
+                            
+                            for batch in batches {
+                                if let Err(e) = runtime.stream.write_all(&batch) {
+                                    error!("Failed to send batch to new runtime at {}: {}", addr, e);
+                                    break;
+                                }
+                            }
                         }
-                    };
-                    
-                    info!("Sending {} existing batches to new runtime at {}", batches.len(), addr);
-                    
-                    for (path, batch_data) in batches {
-                        if let Err(e) = runtime.stream.write_all(&batch_data) {
-                            error!("Failed to send batch {} to new runtime at {}: {}", 
-                                  path.display(), addr, e);
-                            break;
+                        Err(e) => {
+                            error!("Failed to read batches from session file: {}", e);
                         }
                     }
                     
@@ -268,6 +278,10 @@ pub fn run_tcp_mode() -> io::Result<()> {
     let shared_buffer_flush = Arc::clone(&shared_buffer);
     let response_tx_flush = response_tx.clone();
     
+    // Create a mutex-protected session file for the flush thread
+    let session_file = Arc::new(Mutex::new(session_file));
+    let session_file_flush = Arc::clone(&session_file);
+    
     // Set the flush interval (e.g., every 10 seconds)
     let flush_interval = Duration::from_secs(10);
     
@@ -299,9 +313,14 @@ pub fn run_tcp_mode() -> io::Result<()> {
                     debug!("Appending clock record to batch");
                     buf.extend(clock_record.clone());
                     
-                    // Save the batch to a file
+                    // Save the batch data
                     let batch_data = buf.clone();
-                    if let Ok(_batch_path) = write_batch_to_file(&batch_data) {
+                    
+                    // Write to session file
+                    let mut session_file = session_file_flush.lock().unwrap();
+                    if let Err(e) = write_batch_to_file(&batch_data, &mut session_file) {
+                        error!("Failed to write batch to session file: {}", e);
+                    } else {
                         // Increment batch counter for this batch
                         let batch_id = {
                             let mut counter = batch_counter_flush.lock().unwrap();
@@ -410,8 +429,6 @@ pub fn run_tcp_mode() -> io::Result<()> {
                                 }
                             });
                         }
-                    } else {
-                        error!("Failed to write batch to file");
                     }
                     
                     // Clear the buffer after flushing
