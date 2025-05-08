@@ -151,6 +151,7 @@ impl NatTable {
                         
                         self.port_mappings.insert(consensus_port, entry);
                         self.process_ports.insert((pid, src_port), consensus_port);
+                        self.connections.insert((pid, src_port), consensus_port);  // Add to connections map
                         info!("Created NAT entry: {}:{} -> consensus:{} -> {}:{}", 
                             pid, src_port, consensus_port, dest_addr, dest_port);
                         Ok(true)
