@@ -9,6 +9,7 @@ pub struct NatEntry {
     pub process_port: u16,
     pub consensus_port: u16,
     pub connection: TcpStream,
+    pub buffer: Vec<u8>,  // Add buffer for received data
 }
 
 pub struct NatListener {
@@ -16,15 +17,17 @@ pub struct NatListener {
     pub process_port: u16,
     pub consensus_port: u16,
     pub listener: TcpListener,
+    pub pending_accepts: Vec<TcpStream>,
 }
 
 pub struct NatTable {
     port_mappings: HashMap<u16, NatEntry>, // consensus_port -> entry
     process_ports: HashMap<(u64, u16), u16>, // (pid, process_port) -> consensus_port
-    listeners: HashMap<u16, NatListener>, // consensus_port -> listener
+    listeners: HashMap<(u64, u16), NatListener>, // (pid, process_port) -> listener
     connections: HashMap<(u64, u16), u16>, // (pid, process_port) -> connection_consensus_port
     next_port: u16,
-    pending_accepts: HashMap<(u64, u16), bool>, // (pid, src_port) -> has_connection
+    waiting_accepts: HashMap<(u64, u16), bool>, // (pid, src_port) -> is_waiting
+    waiting_recvs: HashMap<(u64, u16), bool>, // (pid, src_port) -> is_waiting
 }
 
 impl NatTable {
@@ -36,7 +39,8 @@ impl NatTable {
             listeners: HashMap::new(),
             connections: HashMap::new(),
             next_port: 10000, // Start from a high port number
-            pending_accepts: HashMap::new(),
+            waiting_accepts: HashMap::new(),
+            waiting_recvs: HashMap::new(),
         }
     }
 
@@ -67,9 +71,10 @@ impl NatTable {
                             process_port: src_port,
                             consensus_port,
                             listener,
+                            pending_accepts: Vec::new(),
                         };
                         
-                        self.listeners.insert(consensus_port, entry);
+                        self.listeners.insert((pid, src_port), entry);
                         self.process_ports.insert((pid, src_port), consensus_port);
                         info!("Created NAT listener: {}:{} -> consensus:{}", 
                             pid, src_port, consensus_port);
@@ -82,52 +87,60 @@ impl NatTable {
                 }
             }
             NetworkOperation::Accept { src_port, new_port } => {
-                // Find the listener for this process:port
-                if let Some(&listener_consensus_port) = self.process_ports.get(&(pid, src_port)) {
-                    if let Some(listener) = self.listeners.get(&listener_consensus_port) {
-                        // Try to accept once
-                        match listener.listener.accept() {
-                            Ok((stream, addr)) => {
-                                // Set to non-blocking mode
-                                if let Err(e) = stream.set_nonblocking(true) {
-                                    error!("Failed to set non-blocking mode: {}", e);
-                                }
-                                
-                                // Only allocate a new port when we successfully accept
-                                let consensus_port = self.allocate_port();
-                                let entry = NatEntry {
-                                    process_id: pid,
-                                    process_port: new_port,  // Use the new port
-                                    consensus_port,
-                                    connection: stream,
-                                };
-                                
-                                // Keep the listener's port mapping and add new one for accepted connection
-                                self.port_mappings.insert(consensus_port, entry);
-                                self.connections.insert((pid, new_port), consensus_port);  // Use new_port
-                                self.pending_accepts.insert((pid, src_port), true);
-                                info!("Accepted connection from {} on {}:{} -> new port {} (listener: {})", 
-                                    addr, pid, src_port, new_port, listener_consensus_port);
-                                Ok(true)
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                // No connection available yet
-                                self.pending_accepts.insert((pid, src_port), false);
-                                debug!("No connection available for {}:{}", pid, src_port);
-                                Ok(false)
-                            }
-                            Err(e) => {
-                                error!("Failed to accept connection on {}:{}: {}", pid, src_port, e);
-                                Err(Box::new(e))
-                            }
+                // First check if we have a listener
+                if !self.listeners.contains_key(&(pid, src_port)) {
+                    error!("No NAT mapping found for process {}:{}", pid, src_port);
+                    return Ok(false);
+                }
+
+                // Try to accept any pending connections
+                let accept_result = {
+                    let listener = self.listeners.get_mut(&(pid, src_port)).unwrap();
+                    listener.listener.accept()
+                };
+
+                match accept_result {
+                    Ok((stream, addr)) => {
+                        debug!("Accepted connection from {} on {}:{} -> new port {} (listener: {})", 
+                            addr, pid, src_port, new_port, self.listeners.get(&(pid, src_port)).unwrap().consensus_port);
+                        
+                        // Set non-blocking mode
+                        if let Err(e) = stream.set_nonblocking(true) {
+                            error!("Failed to set non-blocking mode: {}", e);
                         }
-                    } else {
-                        error!("No listener found for consensus port {}", listener_consensus_port);
+
+                        // Create a new NAT entry for the accepted connection
+                        let consensus_port = self.allocate_port();
+                        let entry = NatEntry {
+                            process_id: pid,
+                            process_port: new_port,
+                            consensus_port,
+                            connection: stream,
+                            buffer: Vec::new(),
+                        };
+                        
+                        // Add the new connection to our tables
+                        self.port_mappings.insert(consensus_port, entry);
+                        self.process_ports.insert((pid, new_port), consensus_port);
+                        self.connections.insert((pid, new_port), consensus_port);
+                        
+                        info!("Created NAT entry for accepted connection: {}:{} -> consensus:{}", 
+                            pid, new_port, consensus_port);
+                        
+                        // Clear waiting state since we have a connection
+                        self.waiting_accepts.remove(&(pid, src_port));
+                        Ok(true)
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // No connection available, set waiting state
+                        self.waiting_accepts.insert((pid, src_port), true);
+                        debug!("No connection available for {}:{}, process will wait", pid, src_port);
                         Ok(false)
                     }
-                } else {
-                    error!("No NAT mapping found for process {}:{}", pid, src_port);
-                    Ok(false)
+                    Err(e) => {
+                        error!("Error accepting connection: {}", e);
+                        Err(Box::new(e))
+                    }
                 }
             }
             NetworkOperation::Connect { dest_addr, dest_port, src_port } => {
@@ -147,6 +160,7 @@ impl NatTable {
                             process_port: src_port,
                             consensus_port,
                             connection: stream,
+                            buffer: Vec::new(),
                         };
                         
                         self.port_mappings.insert(consensus_port, entry);
@@ -218,6 +232,44 @@ impl NatTable {
                     Ok(false)
                 }
             }
+            NetworkOperation::Recv { src_port } => {
+                // Check if this is a connection
+                if let Some(&consensus_port) = self.connections.get(&(pid, src_port)) {
+                    if let Some(entry) = self.port_mappings.get_mut(&consensus_port) {
+                        let mut buf = [0u8; 1024];
+                        match entry.connection.read(&mut buf) {
+                            Ok(0) => {
+                                info!("Connection closed by remote for {}:{}", pid, src_port);
+                                self.waiting_recvs.remove(&(pid, src_port));
+                                Ok(false)
+                            }
+                            Ok(n) => {
+                                // Store the data in the connection's buffer
+                                entry.buffer.extend_from_slice(&buf[..n]);
+                                self.waiting_recvs.remove(&(pid, src_port));
+                                info!("Received {} bytes for process {}:{}", n, pid, src_port);
+                                Ok(true)
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                // No data available yet, mark as waiting
+                                self.waiting_recvs.insert((pid, src_port), true);
+                                debug!("No data available for {}:{}, process will wait", pid, src_port);
+                                Ok(false)
+                            }
+                            Err(e) => {
+                                error!("Error reading from connection {}:{}: {}", pid, src_port, e);
+                                Ok(false)
+                            }
+                        }
+                    } else {
+                        error!("No connection entry found for consensus port {}", consensus_port);
+                        Ok(false)
+                    }
+                } else {
+                    error!("No connection found for process {}:{}", pid, src_port);
+                    Ok(false)
+                }
+            }
             NetworkOperation::Close { src_port } => {
                 debug!("Processing close operation for process {}:{}", pid, src_port);
                 
@@ -232,7 +284,7 @@ impl NatTable {
                 else if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
                     self.port_mappings.remove(&consensus_port);
                     self.process_ports.remove(&(pid, src_port));
-                    self.listeners.remove(&consensus_port);
+                    self.listeners.remove(&(pid, src_port));
                     info!("Closed listener for {}:{}", pid, src_port);
                     Ok(true)
                 } else {
@@ -243,8 +295,79 @@ impl NatTable {
         }
     }
 
+    pub fn is_waiting_for_accept(&self, pid: u64, src_port: u16) -> bool {
+        self.waiting_accepts.get(&(pid, src_port)).copied().unwrap_or(false)
+    }
+
+    pub fn is_waiting_for_recv(&self, pid: u64, src_port: u16) -> bool {
+        self.waiting_recvs.get(&(pid, src_port)).copied().unwrap_or(false)
+    }
+
+    pub fn set_waiting_accept(&mut self, pid: u64, src_port: u16) {
+        self.waiting_accepts.insert((pid, src_port), true);
+        debug!("Process {}:{} is now waiting for accept", pid, src_port);
+    }
+
+    pub fn set_waiting_recv(&mut self, pid: u64, src_port: u16) {
+        self.waiting_recvs.insert((pid, src_port), true);
+        debug!("Process {}:{} is now waiting for recv", pid, src_port);
+    }
+
+    pub fn clear_waiting_accept(&mut self, pid: u64, src_port: u16) {
+        self.waiting_accepts.remove(&(pid, src_port));
+        debug!("Process {}:{} is no longer waiting for accept", pid, src_port);
+    }
+
+    pub fn process_pending_accept(&mut self, pid: u64, src_port: u16) -> bool {
+        debug!("Processing pending accept for process {}:{}", pid, src_port);
+        
+        // Get the pending connection if any
+        let pending_connection = {
+            if let Some(listener) = self.listeners.get_mut(&(pid, src_port)) {
+                debug!("Found listener for {}:{}", pid, src_port);
+                listener.pending_accepts.pop()
+            } else {
+                debug!("No listener found for {}:{}", pid, src_port);
+                None
+            }
+        };
+
+        // If we have a pending connection, create the NAT entry
+        if let Some(stream) = pending_connection {
+            let consensus_port = self.allocate_port();
+            debug!("Allocated consensus port {} for connection from {}:{}", 
+                consensus_port, pid, src_port);
+            
+            let entry = NatEntry {
+                process_id: pid,
+                process_port: src_port,
+                consensus_port,
+                connection: stream,
+                buffer: Vec::new(),
+            };
+            
+            self.port_mappings.insert(consensus_port, entry);
+            self.connections.insert((pid, src_port), consensus_port);
+            info!("Created NAT entry for connection from {}:{} on consensus port {}", 
+                pid, src_port, consensus_port);
+            true
+        } else {
+            debug!("No pending connection found for {}:{}", pid, src_port);
+            false
+        }
+    }
+
+    pub fn clear_waiting_recv(&mut self, pid: u64, src_port: u16) {
+        self.waiting_recvs.remove(&(pid, src_port));
+        debug!("Process {}:{} is no longer waiting for recv", pid, src_port);
+    }
+
     pub fn has_pending_accept(&self, pid: u64, src_port: u16) -> bool {
-        self.pending_accepts.get(&(pid, src_port)).copied().unwrap_or(false)
+        if let Some(listener) = self.listeners.get(&(pid, src_port)) {
+            !listener.pending_accepts.is_empty()
+        } else {
+            false
+        }
     }
 
     pub fn has_port_mapping(&self, pid: u64, src_port: u16) -> bool {
@@ -255,18 +378,72 @@ impl NatTable {
         self.process_ports.insert((pid, src_port), 0);
     }
 
-    pub fn clear_pending_accept(&mut self, pid: u64, src_port: u16) {
-        self.pending_accepts.remove(&(pid, src_port));
-    }
-
-    pub fn set_pending_accept(&mut self, pid: u64, src_port: u16) {
-        self.pending_accepts.insert((pid, src_port), true);
-    }
-
-    pub fn check_for_incoming_data(&mut self) -> Vec<(u64, u16, Vec<u8>)> {
+    pub fn check_for_incoming_data(&mut self) -> Vec<(u64, u16, Vec<u8>, bool)> {
         let mut messages = Vec::new();
         let mut to_remove = Vec::new();
 
+        // First check all listeners for new connections
+        let waiting_listeners: Vec<(u64, u16)> = self.listeners.keys()
+            .filter(|(pid, src_port)| self.is_waiting_for_accept(*pid, *src_port))
+            .cloned()
+            .collect();
+
+        for (pid, src_port) in waiting_listeners {
+            if let Some(listener) = self.listeners.get_mut(&(pid, src_port)) {
+                match listener.listener.accept() {
+                    Ok((stream, addr)) => {
+                        debug!("Accepted connection from {} on {}:{} (listener: {})", 
+                            addr, pid, src_port, listener.consensus_port);
+                        
+                        // Set non-blocking mode
+                        if let Err(e) = stream.set_nonblocking(true) {
+                            error!("Failed to set non-blocking mode: {}", e);
+                        }
+
+                        // Store the accepted connection in the listener's pending accepts
+                        listener.pending_accepts.push(stream);
+                        debug!("Added connection to pending accepts for {}:{}", pid, src_port);
+
+                        // Process the pending accept immediately
+                        if let Some(stream) = listener.pending_accepts.pop() {
+                            // Create a new NAT entry for the accepted connection
+                            let consensus_port = self.allocate_port();
+                            let new_port = 2; // This should match what the runtime expects
+                            let entry = NatEntry {
+                                process_id: pid,
+                                process_port: new_port,  // Use new_port instead of src_port
+                                consensus_port,
+                                connection: stream,
+                                buffer: Vec::new(),
+                            };
+                            
+                            // Add the new connection to our tables
+                            self.port_mappings.insert(consensus_port, entry);
+                            self.process_ports.insert((pid, new_port), consensus_port);
+                            self.connections.insert((pid, new_port), consensus_port);
+                            
+                            info!("Created NAT entry for accepted connection: {}:{} -> consensus:{}", 
+                                pid, new_port, consensus_port);
+                            
+                            // Clear waiting state since we have a connection
+                            self.waiting_accepts.remove(&(pid, src_port));
+
+                            // Notify runtime about the new connection
+                            messages.push((pid, src_port, Vec::new(), true));
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // No connection available, continue checking other listeners
+                        continue;
+                    }
+                    Err(e) => {
+                        error!("Error accepting connection on {}:{}: {}", pid, src_port, e);
+                    }
+                }
+            }
+        }
+
+        // Then check all connections for incoming data
         for (consensus_port, entry) in &mut self.port_mappings {
             let mut buf = [0u8; 1024];
             match entry.connection.read(&mut buf) {
@@ -277,7 +454,7 @@ impl NatTable {
                 Ok(n) => {
                     // Check if this is a connection or listener
                     let is_connection = self.connections.contains_key(&(entry.process_id, entry.process_port));
-                    let is_listener = self.listeners.contains_key(consensus_port);
+                    let is_listener = self.listeners.contains_key(&(entry.process_id, entry.process_port));
                     
                     if is_connection {
                         info!("Received {} bytes from connection for process {}:{}: {:?}", 
@@ -285,7 +462,8 @@ impl NatTable {
                         messages.push((
                             entry.process_id,
                             entry.process_port,
-                            buf[..n].to_vec()
+                            buf[..n].to_vec(),
+                            false
                         ));
                     } else if is_listener {
                         info!("Received {} bytes from listener for process {}:{}: {:?}", 
@@ -293,7 +471,8 @@ impl NatTable {
                         messages.push((
                             entry.process_id,
                             entry.process_port,
-                            buf[..n].to_vec()
+                            buf[..n].to_vec(),
+                            false
                         ));
                     } else {
                         error!("Received data on unknown socket type for {}:{}", 
@@ -317,14 +496,18 @@ impl NatTable {
                 // Remove from appropriate mapping
                 if self.connections.contains_key(&(entry.process_id, entry.process_port)) {
                     self.connections.remove(&(entry.process_id, entry.process_port));
-                } else if self.listeners.contains_key(&port) {
+                } else if self.listeners.contains_key(&(entry.process_id, entry.process_port)) {
                     self.process_ports.remove(&(entry.process_id, entry.process_port));
-                    self.listeners.remove(&port);
+                    self.listeners.remove(&(entry.process_id, entry.process_port));
                 }
                 info!("Removed NAT entry for {}:{}", entry.process_id, entry.process_port);
             }
         }
 
         messages
+    }
+
+    pub fn has_connection(&self, pid: u64, port: u16) -> bool {
+        self.connections.contains_key(&(pid, port))
     }
 } 

@@ -9,6 +9,7 @@ use crate::runtime::process;
 use crate::wasi_syscalls::net::OutgoingNetworkMessage;
 use crate::runtime::fd_table::FDEntry;
 use bincode;
+use consensus::commands::NetworkOperation;
 
 // Use an AtomicU64 for generating unique process IDs.
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
@@ -177,30 +178,35 @@ pub fn process_consensus_pipe<R: Read + Write>(
                         found = true;
                         // If this is a success status message (port 0)
                         if dest_port == 0 && data.len() >= 3 {
-                            let success = data[0] == 1;
+                            let status = data[0];
                             let src_port = (data[1] as u16) | ((data[2] as u16) << 8);
-                            if success {
+                            match status {
+                                1 => { // Success
                                 info!("Network operation succeeded for process {}:{}", process_id, src_port);
                                 // Update the runtime's NAT table to match consensus
                                 let mut nat_table = process.data.nat_table.lock().unwrap();
                                 nat_table.add_port_mapping(process_id, src_port);
-                                // For accept operations, set the pending accept flag
-                                let fd_table = process.data.fd_table.lock().unwrap();
-                                for entry in fd_table.entries.iter() {
-                                    if let Some(FDEntry::Socket { local_port, .. }) = entry {
-                                        if *local_port == src_port {
-                                            nat_table.set_pending_accept(process_id, src_port);
-                                            break;
-                                        }
+                                    // For accept operations, process any pending connection
+                                    if data.len() >= 4 && data[3] == 1 { // Accept operation
+                                        nat_table.process_pending_accept(process_id, src_port);
                                     }
+                                    // Clear the waiting state
+                                    nat_table.clear_waiting_accept(process_id, src_port);
                                 }
-                            } else {
+                                2 => { // Still waiting
+                                    debug!("Network operation still waiting for process {}:{}", process_id, src_port);
+                                    // Keep the process blocked
+                                    let mut nat_table = process.data.nat_table.lock().unwrap();
+                                    nat_table.set_waiting_accept(process_id, src_port);
+                                }
+                                _ => { // Failure
                                 error!("Network operation failed for process {}:{}", process_id, src_port);
-                                // For accept operations, ensure pending accept is false
+                                    // Just clear the waiting state
                                 let mut nat_table = process.data.nat_table.lock().unwrap();
-                                nat_table.clear_pending_accept(process_id, src_port);
+                                    nat_table.clear_waiting_accept(process_id, src_port);
+                                }
                             }
-                            // Notify the process that the operation completed
+                            // Notify the process that the operation completed (or is still waiting)
                             process.data.cond.notify_all();
                             break;
                         }
@@ -236,6 +242,9 @@ pub fn process_consensus_pipe<R: Read + Write>(
                             let mut table = process.data.fd_table.lock().unwrap();
                             if let Some(Some(FDEntry::Socket { buffer, .. })) = table.entries.get_mut(fd) {
                                 buffer.extend_from_slice(data);
+                                // Clear waiting state since we have data
+                                let mut nat_table = process.data.nat_table.lock().unwrap();
+                                nat_table.clear_waiting_recv(process_id, dest_port);
                                 info!("Added NetworkIn data to process {}'s socket FD {} ({} bytes)", 
                                      process_id, fd, data.len());
                             }

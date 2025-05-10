@@ -46,7 +46,7 @@ fn main() -> io::Result<()> {
         "tcp" => modes::run_tcp_mode(),
         "test-server" => test_server::start_test_server(),
         "test-client" => {
-            test_client::start_test_client()?;
+            test_client::run_test_client();
             Ok(())
         },
         "netcat-client" => {

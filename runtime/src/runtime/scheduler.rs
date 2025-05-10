@@ -173,17 +173,20 @@ where
                             }
                             Some(BlockReason::Timeout { resume_after }) => GlobalClock::now() >= resume_after,
                             Some(BlockReason::NetworkIO) => {
-                                // Check if the socket FD has been updated with connection data
+                                let nat_table = proc.data.nat_table.lock().unwrap();
                                 let fd_table = proc.data.fd_table.lock().unwrap();
-                                let mut has_connection = false;
+                                
+                                let mut should_block = false;
                                 for entry in fd_table.entries.iter() {
-                                    if let Some(FDEntry::Socket { .. }) = entry {
-                                        // If we find a File entry, it means the socket was updated with connection data
-                                        has_connection = true;
+                                    if let Some(FDEntry::Socket { local_port, .. }) = entry {
+                                        if nat_table.is_waiting_for_accept(proc.id, *local_port) || 
+                                           nat_table.is_waiting_for_recv(proc.id, *local_port) {
+                                            should_block = true;
                                         break;
+                                        }
                                     }
                                 }
-                                has_connection
+                                !should_block
                             },
                             _ => false,
                         }

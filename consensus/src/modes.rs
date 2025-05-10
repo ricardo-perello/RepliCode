@@ -192,19 +192,27 @@ pub fn run_tcp_mode() -> io::Result<()> {
                 match bincode::deserialize::<NetworkOperation>(&payload) {
                     Ok(op) => {
                         debug!("Received network operation from runtime for process {}: {:?}", pid, op);
-                        // Get source port before moving op
-                        let src_port = match &op {
-                            NetworkOperation::Listen { src_port } => *src_port,
-                            NetworkOperation::Accept { src_port, new_port: _ } => *src_port,
-                            NetworkOperation::Connect { src_port, .. } => *src_port,
-                            NetworkOperation::Send { src_port, .. } => *src_port,
-                            NetworkOperation::Close { src_port } => *src_port,
+                        // Get source port and operation type before moving op
+                        let (src_port, is_accept) = match &op {
+                            NetworkOperation::Connect { src_port, .. } => (*src_port, false),
+                            NetworkOperation::Send { src_port, .. } => (*src_port, false),
+                            NetworkOperation::Listen { src_port } => (*src_port, false),
+                            NetworkOperation::Accept { src_port, .. } => (*src_port, true),
+                            NetworkOperation::Close { src_port } => (*src_port, false),
+                            NetworkOperation::Recv { src_port } => (*src_port, false),
                         };
                         match nat_table_clone.lock().unwrap().handle_network_operation(pid, op) {
                             Ok(success) => {
-                                // Send success status back to runtime
+                                // Send status back to runtime
                                 let mut buf = shared_buffer_clone.lock().unwrap();
-                                if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![if success { 1 } else { 0 }, src_port as u8, (src_port >> 8) as u8])) {
+                                let status = if is_accept && !success {
+                                    2 // Still waiting
+                                } else if success {
+                                    1 // Success
+                                } else {
+                                    0 // Failure
+                                };
+                                if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![status, src_port as u8, (src_port >> 8) as u8])) {
                                     buf.extend(record);
                                 }
                             }
@@ -235,10 +243,19 @@ pub fn run_tcp_mode() -> io::Result<()> {
             let messages = nat_table_clone.lock().unwrap().check_for_incoming_data();
             if !messages.is_empty() {
                 let mut buf = shared_buffer_clone.lock().unwrap();
-                for (pid, port, data) in messages {
-                    debug!("Received {} bytes from network for process {} port {}", data.len(), pid, port);
-                    if let Ok(record) = write_record(&Command::NetworkIn(pid, port, data)) {
-                        buf.extend(record);
+                for (pid, port, data, is_connection) in messages {
+                    if is_connection {
+                        // Send a connection notification (status 1 for success)
+                        debug!("Notifying runtime about new connection for process {} port {}", pid, port);
+                        if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![1, port as u8, (port >> 8) as u8])) {
+                            buf.extend(record);
+                        }
+                    } else if !data.is_empty() {
+                        // Send actual data
+                        debug!("Received {} bytes from network for process {} port {}", data.len(), pid, port);
+                        if let Ok(record) = write_record(&Command::NetworkIn(pid, port, data)) {
+                            buf.extend(record);
+                        }
                     }
                 }
             }

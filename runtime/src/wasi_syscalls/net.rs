@@ -327,7 +327,7 @@ pub fn wasi_sock_accept(
     // Check if we got a connection
     let has_connection = {
         let process_data = caller.data();
-        process_data.nat_table.lock().unwrap().has_pending_accept(pid, src_port)
+        process_data.nat_table.lock().unwrap().has_connection(pid, new_port)
     };
 
     if has_connection {
@@ -350,7 +350,7 @@ pub fn wasi_sock_accept(
         // Clear the pending accept
         {
             let process_data = caller.data();
-            process_data.nat_table.lock().unwrap().clear_pending_accept(pid, src_port);
+            process_data.nat_table.lock().unwrap().clear_waiting_accept(pid, src_port);
         }
 
         info!("Created new socket FD {} for accepted connection on process {}:{} -> {}", new_fd, pid, src_port, new_port);
@@ -443,7 +443,7 @@ pub fn wasi_sock_recv(
 }
 
 pub fn wasi_sock_shutdown(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
     how: u32,
 ) -> Result<u32> {
