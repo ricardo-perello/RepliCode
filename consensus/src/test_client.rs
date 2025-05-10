@@ -16,23 +16,53 @@ pub fn run_test_client() {
     };
     info!("Connected to test server");
 
-    // Send a test message
-    let message = "Hello from test client!\n";
-    if let Err(e) = stream.write_all(message.as_bytes()) {
-        eprintln!("Failed to send message: {}", e);
-        return;
-    }
-    info!("Sent message to server");
+    // Create a buffered reader for stdin
+    let stdin = io::stdin();
+    let mut reader = BufReader::new(stdin);
+    let mut input = String::new();
 
-    // Read response
-    let mut buffer = [0; 1024];
-    match stream.read(&mut buffer) {
-        Ok(n) => {
-            let response = String::from_utf8_lossy(&buffer[..n]);
-            println!("Received response: {}", response);
-        }
-        Err(e) => {
-            eprintln!("Failed to read response: {}", e);
+    loop {
+        // Clear the input buffer
+        input.clear();
+        
+        // Read a line from stdin
+        print!("Enter message (or 'quit' to exit): ");
+        io::stdout().flush().unwrap();
+        
+        match reader.read_line(&mut input) {
+            Ok(_) => {
+                // Trim the newline
+                let message = input.trim();
+                
+                // Check if user wants to quit
+                if message == "quit" {
+                    break;
+                }
+
+                // Send the message
+                if let Err(e) = writeln!(stream, "{}", message) {
+                    eprintln!("Failed to send message: {}", e);
+                    break;
+                }
+                info!("Sent message to server");
+
+                // Read response
+                let mut buffer = [0; 1024];
+                match stream.read(&mut buffer) {
+                    Ok(n) => {
+                        let response = String::from_utf8_lossy(&buffer[..n]);
+                        println!("Received response: {}", response);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to read response: {}", e);
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to read input: {}", e);
+                break;
+            }
         }
     }
 } 

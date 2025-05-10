@@ -418,27 +418,57 @@ pub fn wasi_sock_recv(
 ) -> i32 {
     debug!("wasi_sock_recv: fd={}, ri_data_ptr={}, ri_data_len={}, ri_flags={}, ro_datalen_ptr={}, ro_flags_ptr={}", 
         fd, ri_data_ptr, ri_data_len, ri_flags, ro_datalen_ptr, ro_flags_ptr);
-    
     let pid;
     let src_port;
-    let data;
-    
-    // Get socket FD entry and data
+    let mut data = Vec::new();
+    let mut has_data = false;
     {
         let process_data = caller.data();
         pid = process_data.id;
         let mut table = process_data.fd_table.lock().unwrap();
         if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, buffer, .. })) = table.entries.get_mut(fd as usize) {
             src_port = *local_port;
-            if buffer.is_empty() {
-                debug!("No data available for socket {}:{}", pid, src_port);
-                return 11; // EAGAIN
+            if !buffer.is_empty() {
+                data = buffer.drain(..).collect::<Vec<u8>>();
+                has_data = true;
             }
-            data = buffer.drain(..).collect::<Vec<u8>>();
         } else {
             error!("Invalid socket FD {} for process {}", fd, pid);
             return 1; // EINVAL
         }
+    }
+
+    if !has_data {
+        // Queue a Recv operation and block until data is available
+        debug!("No data available for socket {}:{}, queuing Recv operation and blocking", pid, src_port);
+        {
+            let process_data = caller.data();
+            let op = NetworkOperation::Recv { src_port };
+            process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
+                pid,
+                operation: op,
+            });
+        }
+        debug!("Blocking process {} for network recv operation", pid);
+        block_process_for_network(&mut caller);
+        // After waking up, check buffer again
+        let mut data2 = Vec::new();
+        let mut has_data2 = false;
+        {
+            let process_data = caller.data();
+            let mut table = process_data.fd_table.lock().unwrap();
+            if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { buffer, .. })) = table.entries.get_mut(fd as usize) {
+                if !buffer.is_empty() {
+                    data2 = buffer.drain(..).collect::<Vec<u8>>();
+                    has_data2 = true;
+                }
+            }
+        }
+        if !has_data2 {
+            debug!("No data available for socket {}:{} after blocking, returning EAGAIN", pid, src_port);
+            return 11; // EAGAIN
+        }
+        data = data2;
     }
 
     // Get the memory to write data to
