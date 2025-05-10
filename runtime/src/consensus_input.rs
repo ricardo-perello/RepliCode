@@ -228,10 +228,24 @@ pub fn process_consensus_pipe<R: Read + Write>(
                                     nat_table.set_waiting_accept(process_id, src_port);
                                 }
                                 _ => { // Failure
-                                error!("Network operation failed for process {}:{}", process_id, src_port);
-                                    // Just clear the waiting state
-                                let mut nat_table = process.data.nat_table.lock().unwrap();
+                                    error!("Network operation failed for process {}:{}", process_id, src_port);
+                                    // Clear both waiting states to ensure process unblocks
+                                    let mut nat_table = process.data.nat_table.lock().unwrap();
                                     nat_table.clear_waiting_accept(process_id, src_port);
+                                    nat_table.clear_waiting_recv(process_id, src_port);
+                                    debug!("Cleared waiting states for process {}:{} due to failure", process_id, src_port);
+                                    
+                                    // Also mark any connected sockets as disconnected
+                                    let mut table = process.data.fd_table.lock().unwrap();
+                                    for (fd, entry) in table.entries.iter_mut().enumerate() {
+                                        if let Some(FDEntry::Socket { local_port, connected, .. }) = entry {
+                                            if *local_port == src_port && *connected {
+                                                *connected = false;
+                                                debug!("Marked socket FD {} as disconnected for process {}:{}", 
+                                                      fd, process_id, src_port);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             // Notify the process that the operation completed (or is still waiting)
