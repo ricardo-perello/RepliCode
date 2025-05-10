@@ -5,6 +5,9 @@ mod nat;
 mod test_server;
 mod test_client;
 mod netcat_client;
+mod image_client;
+mod dircopy_client;
+mod kv_client;
 
 use std::env;
 use std::io;
@@ -51,6 +54,18 @@ fn main() -> io::Result<()> {
         },
         "netcat-client" => {
             netcat_client::start_netcat_client()?;
+            Ok(())
+        },
+        "image-client" => {
+            image_client::start_image_client()?;
+            Ok(())
+        },
+        "dircopy-client" => {
+            dircopy_client::start_dircopy_client()?;
+            Ok(())
+        },
+        "kv-client" => {
+            kv_client::start_kv_client()?;
             Ok(())
         },
         _ => {
