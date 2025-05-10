@@ -199,43 +199,132 @@ pub fn run_tcp_mode() -> io::Result<()> {
                 }
                 
                 // Deserialize network operation
+                debug!("Attempting to deserialize network operation...");
                 match bincode::deserialize::<NetworkOperation>(&payload) {
                     Ok(op) => {
-                        debug!("Received network operation from runtime for process {}: {:?}", pid, op);
+                        debug!("Successfully deserialized network operation: {:?}", op);
                         // Get source port, new port, and operation type before moving op
-                        let (src_port, new_port, is_accept) = match &op {
-                            NetworkOperation::Connect { src_port, .. } => (*src_port, 0, false),
-                            NetworkOperation::Send { src_port, .. } => (*src_port, 0, false),
-                            NetworkOperation::Listen { src_port } => (*src_port, 0, false),
-                            NetworkOperation::Accept { src_port, new_port, .. } => (*src_port, *new_port, true),
-                            NetworkOperation::Close { src_port } => (*src_port, 0, false),
-                            NetworkOperation::Recv { src_port } => (*src_port, 0, false),
+                        let (src_port, new_port, is_accept, is_recv) = match &op {
+                            NetworkOperation::Connect { src_port, .. } => (*src_port, 0, false, false),
+                            NetworkOperation::Send { src_port, .. } => (*src_port, 0, false, false),
+                            NetworkOperation::Listen { src_port } => (*src_port, 0, false, false),
+                            NetworkOperation::Accept { src_port, new_port, .. } => (*src_port, *new_port, true, false),
+                            NetworkOperation::Close { src_port } => (*src_port, 0, false, false),
+                            NetworkOperation::Recv { src_port } => (*src_port, 0, false, true),
                         };
-                        match nat_table_clone.lock().unwrap().handle_network_operation(pid, op) {
-                            Ok(success) => {
-                                // Send status back to runtime
-                                let mut buf = shared_buffer_clone.lock().unwrap();
-                                let status = if is_accept && !success {
-                                    2 // Still waiting
-                                } else if success {
-                                    1 // Success
-                                } else {
-                                    0 // Failure
-                                };
-                                if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![
-                                    status, 
-                                    src_port as u8, (src_port >> 8) as u8,
-                                    new_port as u8, (new_port >> 8) as u8
-                                ])) {
-                                    buf.extend(record);
+                        debug!("Operation details - src_port: {}, new_port: {}, is_accept: {}, is_recv: {}", 
+                               src_port, new_port, is_accept, is_recv);
+                        
+                        debug!("Attempting to acquire NAT table lock...");
+                        // Store whether the connection exists for recv operations
+                        let mut connection_exists = true;
+                        if is_recv {
+                            // Get a mutable reference to the NAT table
+                            let mut nat_ref = nat_table_clone.lock().unwrap();
+                            // Check connection status before the operation
+                            connection_exists = nat_ref.has_connection(pid, src_port);
+                            debug!("Connection check before operation for process {} port {}: {}", pid, src_port, connection_exists);
+                            // Now perform the operation
+                            let op_result = nat_ref.handle_network_operation(pid, op);
+                            // Release the lock before sending the status back
+                            drop(nat_ref);
+                            match op_result {
+                                Ok(success) => {
+                                    debug!("Network operation completed with success={}", success);
+                                    // Send status back to runtime
+                                    debug!("Attempting to acquire shared buffer lock...");
+                                    let mut buf = shared_buffer_clone.lock().unwrap();
+                                    debug!("Acquired shared buffer lock");
+                                    
+                                    let status = if !success {
+                                        // Check if we should wait or report connection closed
+                                        if connection_exists {
+                                            debug!("Process {} still waiting for recv on port {}", pid, src_port);
+                                            2 // Still waiting
+                                        } else {
+                                            error!("Connection closed for process {} on port {}", pid, src_port);
+                                            0 // Failure - connection closed
+                                        }
+                                    } else {
+                                        info!("Network operation succeeded for process {} on port {}", pid, src_port);
+                                        1 // Success
+                                    };
+                                    
+                                    debug!("Preparing to send response back to runtime for process {}:{} with status {}", 
+                                          pid, src_port, status);
+                                    if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![
+                                        status, 
+                                        src_port as u8, (src_port >> 8) as u8,
+                                        new_port as u8, (new_port >> 8) as u8
+                                    ])) {
+                                        debug!("Response record created, length: {}", record.len());
+                                        buf.extend(record);
+                                        debug!("Response record added to buffer, new buffer size: {}", buf.len());
+                                    } else {
+                                        error!("Failed to create response record for process {}:{}", pid, src_port);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to handle network operation for process {} on port {}: {}", 
+                                        pid, src_port, e);
+                                    // Send error status back to runtime
+                                    debug!("Attempting to acquire shared buffer lock for error response...");
+                                    let mut buf = shared_buffer_clone.lock().unwrap();
+                                    debug!("Acquired shared buffer lock for error response");
+                                    if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![0])) {
+                                        debug!("Error response record created, length: {}", record.len());
+                                        buf.extend(record);
+                                        debug!("Error response record added to buffer");
+                                    }
                                 }
                             }
-                            Err(e) => {
-                                error!("Failed to handle network operation: {}", e);
-                                // Send error status back to runtime
-                                let mut buf = shared_buffer_clone.lock().unwrap();
-                                if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![0])) {
-                                    buf.extend(record);
+                        } else {
+                            // For non-recv operations, handle normally
+                            match nat_table_clone.lock().unwrap().handle_network_operation(pid, op) {
+                                Ok(success) => {
+                                    debug!("Network operation completed with success={}", success);
+                                    // Send status back to runtime
+                                    debug!("Attempting to acquire shared buffer lock...");
+                                    let mut buf = shared_buffer_clone.lock().unwrap();
+                                    debug!("Acquired shared buffer lock");
+                                    
+                                    let status = if is_accept && !success {
+                                        debug!("Process {} still waiting for accept on port {}", pid, src_port);
+                                        2 // Still waiting
+                                    } else if success {
+                                        info!("Network operation succeeded for process {} on port {}", pid, src_port);
+                                        1 // Success
+                                    } else {
+                                        error!("Network operation failed for process {} on port {}", pid, src_port);
+                                        0 // Failure
+                                    };
+                                    
+                                    debug!("Preparing to send response back to runtime for process {}:{} with status {}", 
+                                          pid, src_port, status);
+                                    if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![
+                                        status, 
+                                        src_port as u8, (src_port >> 8) as u8,
+                                        new_port as u8, (new_port >> 8) as u8
+                                    ])) {
+                                        debug!("Response record created, length: {}", record.len());
+                                        buf.extend(record);
+                                        debug!("Response record added to buffer, new buffer size: {}", buf.len());
+                                    } else {
+                                        error!("Failed to create response record for process {}:{}", pid, src_port);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to handle network operation for process {} on port {}: {}", 
+                                        pid, src_port, e);
+                                    // Send error status back to runtime
+                                    debug!("Attempting to acquire shared buffer lock for error response...");
+                                    let mut buf = shared_buffer_clone.lock().unwrap();
+                                    debug!("Acquired shared buffer lock for error response");
+                                    if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![0])) {
+                                        debug!("Error response record created, length: {}", record.len());
+                                        buf.extend(record);
+                                        debug!("Error response record added to buffer");
+                                    }
                                 }
                             }
                         }
@@ -272,6 +361,14 @@ pub fn run_tcp_mode() -> io::Result<()> {
                         // Send actual data
                         debug!("Received {} bytes from network for process {} port {}", data.len(), pid, port);
                         if let Ok(record) = write_record(&Command::NetworkIn(pid, port, data)) {
+                            buf.extend(record);
+                        }
+                        // Send success status for recv operation
+                        if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![
+                            1,  // Success status
+                            port as u8, (port >> 8) as u8,  // Source port
+                            0, 0  // No new port for recv
+                        ])) {
                             buf.extend(record);
                         }
                     }

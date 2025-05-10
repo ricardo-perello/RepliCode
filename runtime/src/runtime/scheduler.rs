@@ -178,11 +178,11 @@ where
                                 
                                 let mut should_block = false;
                                 for entry in fd_table.entries.iter() {
-                                    if let Some(FDEntry::Socket { local_port, .. }) = entry {
+                                    if let Some(FDEntry::Socket { local_port, buffer, .. }) = entry {
                                         if nat_table.is_waiting_for_accept(proc.id, *local_port) || 
-                                           nat_table.is_waiting_for_recv(proc.id, *local_port) {
+                                           (nat_table.is_waiting_for_recv(proc.id, *local_port) && buffer.is_empty()) {
                                             should_block = true;
-                                        break;
+                                            break;
                                         }
                                     }
                                 }

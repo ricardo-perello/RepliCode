@@ -448,9 +448,12 @@ pub fn wasi_sock_recv(
                 pid,
                 operation: op,
             });
+            // Set waiting state for recv
+            process_data.nat_table.lock().unwrap().set_waiting_recv(pid, src_port);
         }
         debug!("Blocking process {} for network recv operation", pid);
         block_process_for_network(&mut caller);
+        
         // After waking up, check buffer again
         let mut data2 = Vec::new();
         let mut has_data2 = false;
@@ -464,6 +467,7 @@ pub fn wasi_sock_recv(
                 }
             }
         }
+        
         if !has_data2 {
             debug!("No data available for socket {}:{} after blocking, returning EAGAIN", pid, src_port);
             return 11; // EAGAIN
@@ -505,6 +509,12 @@ pub fn wasi_sock_recv(
         return 1; // EINVAL
     }
     mem_mut[flags_ptr..flags_ptr + 4].copy_from_slice(&0u32.to_le_bytes());
+
+    // Clear the waiting state since we successfully read data
+    {
+        let process_data = caller.data();
+        process_data.nat_table.lock().unwrap().clear_waiting_recv(pid, src_port);
+    }
 
     info!("Read {} bytes from socket {}:{}", data_len, pid, src_port);
     0 // Success
