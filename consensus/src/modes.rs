@@ -232,10 +232,10 @@ pub fn run_tcp_mode() -> io::Result<()> {
                     match read_all_batches(&session_file_path_listener) {
                         Ok(batches) => {
                             info!("Sending {} existing batches to new runtime at {}", batches.len(), addr);
-                            
-                            for batch in batches {
-                                if let Err(e) = runtime.stream.write_all(&batch) {
-                                    error!("Failed to send batch to new runtime at {}: {}", addr, e);
+                            for (i, batch) in batches.iter().enumerate() {
+                                info!("Sending batch {} to new runtime at {}: size={} first_bytes={:?}", i, addr, batch.len(), &batch[..batch.len().min(8)]);
+                                if let Err(e) = runtime.stream.write_all(batch) {
+                                    error!("Failed to send batch {} to new runtime at {}: {}", i, addr, e);
                                     break;
                                 }
                             }
@@ -246,7 +246,12 @@ pub fn run_tcp_mode() -> io::Result<()> {
                     }
                     
                     // Add the runtime to our collection
-                    runtimes_listener.lock().unwrap().push(runtime);
+                    let num_runtimes = {
+                        let mut runtimes = runtimes_listener.lock().unwrap();
+                        runtimes.push(runtime);
+                        runtimes.len()
+                    };
+                    info!("New runtime added. Total runtimes: {}", num_runtimes);
                     
                     // If we just connected our first runtime and have pending messages, send them
                     {
@@ -289,6 +294,10 @@ pub fn run_tcp_mode() -> io::Result<()> {
     let batch_counter: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let batch_counter_flush = Arc::clone(&batch_counter);
     
+    // Add a flag to track if the batch contains a network operation
+    let has_network_op = Arc::new(Mutex::new(false));
+    let has_network_op_flush = Arc::clone(&has_network_op);
+    
     // Spawn a thread to periodically flush the buffer and send to all runtimes
     thread::spawn(move || {
         loop {
@@ -297,6 +306,7 @@ pub fn run_tcp_mode() -> io::Result<()> {
             // Lock buffer, check if there are any messages
             let mut buf = shared_buffer_flush.lock().unwrap();
             let mut runtimes = runtimes_flush.lock().unwrap();
+            let mut has_network_op = has_network_op_flush.lock().unwrap();
             
             if runtimes.is_empty() {
                 // No runtimes connected, keep accumulating messages
@@ -360,22 +370,20 @@ pub fn run_tcp_mode() -> io::Result<()> {
                             warn!("Removed disconnected runtime at {}", removed.address);
                         }
                         
-                        // Start a thread to listen for the first response
-                        if !active_runtimes.is_empty() && original_size > 0 {
+                        // Only wait for a reply if the batch contains a network operation
+                        if *has_network_op && !active_runtimes.is_empty() && original_size > 0 {
                             let runtimes_response = Arc::clone(&runtimes_flush);
                             let tx = response_tx_flush.clone();
                             let batch_id_clone = batch_id;
-                            
+                            info!("Waiting for reply to batch {} from {} runtimes (network op)", batch_id, active_runtimes.len());
                             thread::spawn(move || {
                                 // Create a channel for each runtime to send its response
                                 let (first_response_tx, first_response_rx) = mpsc::channel();
-                                
                                 // For each active runtime, spawn a thread to read its response
                                 for runtime_idx in active_runtimes {
                                     let runtimes_clone = Arc::clone(&runtimes_response);
                                     let tx_clone = first_response_tx.clone();
                                     let thread_batch_id = batch_id_clone;
-                                    
                                     thread::spawn(move || {
                                         // Get runtime stream
                                         let mut runtime_stream = {
@@ -385,22 +393,20 @@ pub fn run_tcp_mode() -> io::Result<()> {
                                             }
                                             runtimes[runtime_idx].stream.try_clone().unwrap()
                                         };
-                                        
                                         // Try to read a response (simple ACK)
                                         let mut response = [0u8; 1];
                                         match runtime_stream.read_exact(&mut response) {
                                             Ok(_) => {
+                                                info!("Received reply for batch {} from runtime {}: {:?}", thread_batch_id, runtime_idx, response);
                                                 // Send the response through the channel
                                                 let _ = tx_clone.send((thread_batch_id, runtime_idx, response[0] == 1));
                                             }
                                             Err(e) => {
-                                                error!("Failed to read response from runtime {}: {}", 
-                                                       runtime_idx, e);
+                                                error!("Failed to read response from runtime {}: {}", runtime_idx, e);
                                             }
                                         }
                                     });
                                 }
-                                
                                 // Wait for the first response or timeout
                                 match first_response_rx.recv_timeout(Duration::from_secs(5)) {
                                     Ok((batch_id, runtime_idx, success)) => {
@@ -413,11 +419,7 @@ pub fn run_tcp_mode() -> io::Result<()> {
                                                 "unknown".to_string()
                                             }
                                         };
-                                        
-                                        info!("Got {} response for batch {} from runtime at {}",
-                                              if success { "successful" } else { "failed" },
-                                              batch_id, runtime_addr);
-                                        
+                                        info!("Got {} response for batch {} from runtime at {}", if success { "successful" } else { "failed" }, batch_id, runtime_addr);
                                         // Forward this to the main response channel
                                         let _ = tx.send((batch_id, success));
                                     }
@@ -433,6 +435,8 @@ pub fn run_tcp_mode() -> io::Result<()> {
                     
                     // Clear the buffer after flushing
                     buf.clear();
+                    // Reset the network op flag
+                    *has_network_op = false;
                 }
             } else {
                 error!("Failed to create clock record");
@@ -599,6 +603,11 @@ pub fn run_tcp_mode() -> io::Result<()> {
         }
         if let Some(cmd) = parse_command(input) {
             debug!("Received command: {:?}", cmd);
+            // Track if this command is a network operation
+            let is_network_op = matches!(cmd, Command::NetworkIn(..) | Command::NetworkOut(..));
+            if is_network_op {
+                *has_network_op.lock().unwrap() = true;
+            }
             match write_record(&cmd) {
                 Ok(record) => {
                     debug!("Encoded command into {} bytes", record.len());

@@ -55,210 +55,209 @@ pub fn process_consensus_pipe<R: Read + Write>(
         reader.get_mut().write_all(&op_bytes)?;
     }
 
-    loop {
-        // Read the message type (1 byte)
-        let mut msg_type_buf = [0u8; 1];
-        if reader.read_exact(&mut msg_type_buf).is_err() {
-            debug!("No more data in consensus pipe");
-            break; // No more data.
-        }
-        let msg_type = msg_type_buf[0];
-        debug!("Received message type {} from consensus pipe", msg_type);
-
-        // Read process_id (8 bytes)
-        let process_id = match reader.read_u64::<LittleEndian>() {
-            Ok(pid) => pid,
-            Err(_) => break,
-        };
-
-        // Read payload length (4 bytes)
-        let payload_len = match reader.read_u32::<LittleEndian>() {
-            Ok(sz) => sz as usize,
-            Err(_) => break,
-        };
-
-        debug!("Reading payload of {} bytes for process {}", payload_len, process_id);
-
-        // Read the payload.
-        let mut payload = vec![0u8; payload_len];
-        if let Err(e) = reader.read_exact(&mut payload) {
-            error!("Failed to read message from pipe: {}", e);
-            break;
-        }
-
-        match msg_type {
-            0 => { // Clock update.
-                let msg_str = String::from_utf8_lossy(&payload);
-                debug!("Processing clock update: {}", msg_str);
-                if let Some(delta_str) = msg_str.strip_prefix("clock:") {
-                    match delta_str.trim().parse::<u64>() {
-                        Ok(delta) => {
-                            GlobalClock::increment(delta);
-                            info!("Global clock incremented by {}", delta);
-                        }
-                        Err(e) => error!("Invalid clock increment in pipe: {}", e),
-                    }
-                } else {
-                    error!("Invalid clock message format in pipe: {}", msg_str);
-                }
-                break; // End of batch.
-            },
-            1 => { // FD update.
-                let msg_str = String::from_utf8_lossy(&payload);
-                debug!("Processing FD update for process {}: {}", process_id, msg_str);
-                let parts: Vec<&str> = msg_str.split(",body:").collect();
-                if parts.len() != 2 {
-                    error!("Invalid FD update format for process {}: {}", process_id, msg_str);
-                    continue;
-                }
-                let fd: i32 = if let Some(fd_part) = parts[0].strip_prefix("fd:") {
-                    match fd_part.trim().parse() {
-                        Ok(num) => num,
-                        Err(_) => {
-                            error!("Invalid FD in FD update for process {}: {}", process_id, msg_str);
-                            continue;
-                        }
-                    }
-                } else {
-                    error!("Missing FD prefix in FD update for process {}: {}", process_id, msg_str);
-                    continue;
-                };
-                let body = parts[1].trim();
-                let mut found = false;
-                for process in processes.iter_mut() {
-                    if process.id == process_id {
-                        found = true;
-                        let mut table = process.data.fd_table.lock().unwrap();
-                        if let Some(Some(FDEntry::File { buffer, .. })) = table.entries.get_mut(fd as usize) {
-                            buffer.extend_from_slice(body.as_bytes());
-                            buffer.push(b'\n');
-                            info!("Added FD update to process {}'s FD {} ({} bytes)", process_id, fd, body.len());
-                        } else {
-                            error!("Process {} does not have FD {} open for FD update", process_id, fd);
-                        }
-                        process.data.cond.notify_all();
-                        break;
-                    }
-                }
-                if !found {
-                    error!("No process found with ID {} for FD update", process_id);
-                }
-            },
-            2 => { // Init command.
-                debug!("Processing init command for new process");
-                let new_pid = get_next_pid();
-                match process::start_process_from_bytes(payload, new_pid) {
-                    Ok(proc) => {
-                        processes.push(proc);
-                        info!("Added new process {} to scheduler", new_pid);
-                    }
-                    Err(e) => {
-                        error!("Failed to create new process {}: {}", new_pid, e);
-                    }
-                }
-            },
-            3 => { // NetworkIn
-                debug!("Processing NetworkIn for process {}", process_id);
-                // The payload already contains the port + data
-                // First 2 bytes are the destination port
-                if payload.len() < 2 {
-                    error!("NetworkIn payload too short for process {}", process_id);
-                    continue;
-                }
-                
-                let dest_port = (payload[0] as u16) | ((payload[1] as u16) << 8);
-                let data = &payload[2..];
-                
-                debug!("Received {} bytes from network for process {} port {}: {}", data.len(), process_id, dest_port, String::from_utf8_lossy(data));
-                
-                let mut found = false;
-                for process in processes.iter_mut() {
-                    if process.id == process_id {
-                        found = true;
-                        // If this is a success status message (port 0)
-                        if dest_port == 0 && data.len() >= 3 {
-                            let success = data[0] == 1;
-                            let src_port = (data[1] as u16) | ((data[2] as u16) << 8);
-                            if success {
-                                info!("Network operation succeeded for process {}:{}", process_id, src_port);
-                                // Update the runtime's NAT table to match consensus
-                                let mut nat_table = process.data.nat_table.lock().unwrap();
-                                nat_table.add_port_mapping(process_id, src_port);
-                                // For accept operations, set the pending accept flag
-                                let fd_table = process.data.fd_table.lock().unwrap();
-                                for entry in fd_table.entries.iter() {
-                                    if let Some(FDEntry::Socket { local_port, .. }) = entry {
-                                        if *local_port == src_port {
-                                            nat_table.set_pending_accept(process_id, src_port);
-                                            break;
-                                        }
-                                    }
-                                }
-                            } else {
-                                error!("Network operation failed for process {}:{}", process_id, src_port);
-                                // For accept operations, ensure pending accept is false
-                                let mut nat_table = process.data.nat_table.lock().unwrap();
-                                nat_table.clear_pending_accept(process_id, src_port);
+    let mut processed_any = false;
+    'outer: loop {
+        // For each batch, process until a clock update (type 0) is found
+        loop {
+            // Read the message type (1 byte)
+            let mut msg_type_buf = [0u8; 1];
+            if reader.read_exact(&mut msg_type_buf).is_err() {
+                debug!("No more data in consensus pipe");
+                break 'outer; // No more data.
+            }
+            let msg_type = msg_type_buf[0];
+            // Read process_id (8 bytes)
+            let process_id = match reader.read_u64::<LittleEndian>() {
+                Ok(pid) => pid,
+                Err(_) => break 'outer,
+            };
+            // Read payload length (4 bytes)
+            let payload_len = match reader.read_u32::<LittleEndian>() {
+                Ok(sz) => sz as usize,
+                Err(_) => break 'outer,
+            };
+            debug!("[BATCH] Header: type={} pid={} payload_len={}", msg_type, process_id, payload_len);
+            // Read the payload.
+            let mut payload = vec![0u8; payload_len];
+            if let Err(e) = reader.read_exact(&mut payload) {
+                error!("Failed to read message from pipe: {}", e);
+                break 'outer;
+            }
+            processed_any = true;
+            match msg_type {
+                0 => { // Clock update.
+                    let msg_str = String::from_utf8_lossy(&payload);
+                    debug!("[BATCH] Processing clock update: {}", msg_str);
+                    if let Some(delta_str) = msg_str.strip_prefix("clock:") {
+                        match delta_str.trim().parse::<u64>() {
+                            Ok(delta) => {
+                                GlobalClock::increment(delta);
+                                info!("Global clock incremented by {}", delta);
                             }
-                            // Notify the process that the operation completed
+                            Err(e) => error!("Invalid clock increment in pipe: {}", e),
+                        }
+                    } else {
+                        error!("Invalid clock message format in pipe: {}", msg_str);
+                    }
+                    break; // End of batch, go to next batch if available
+                },
+                1 => { // FD update.
+                    let msg_str = String::from_utf8_lossy(&payload);
+                    debug!("[BATCH] Processing FD update for process {}: {}", process_id, msg_str);
+                    let parts: Vec<&str> = msg_str.split(",body:").collect();
+                    if parts.len() != 2 {
+                        error!("Invalid FD update format for process {}: {}", process_id, msg_str);
+                        continue;
+                    }
+                    let fd: i32 = if let Some(fd_part) = parts[0].strip_prefix("fd:") {
+                        match fd_part.trim().parse() {
+                            Ok(num) => num,
+                            Err(_) => {
+                                error!("Invalid FD in FD update for process {}: {}", process_id, msg_str);
+                                continue;
+                            }
+                        }
+                    } else {
+                        error!("Missing FD prefix in FD update for process {}: {}", process_id, msg_str);
+                        continue;
+                    };
+                    let body = parts[1].trim();
+                    let mut found = false;
+                    for process in processes.iter_mut() {
+                        if process.id == process_id {
+                            found = true;
+                            let mut table = process.data.fd_table.lock().unwrap();
+                            if let Some(Some(FDEntry::File { buffer, .. })) = table.entries.get_mut(fd as usize) {
+                                buffer.extend_from_slice(body.as_bytes());
+                                buffer.push(b'\n');
+                                info!("Added FD update to process {}'s FD {} ({} bytes)", process_id, fd, body.len());
+                            } else {
+                                error!("Process {} does not have FD {} open for FD update", process_id, fd);
+                            }
                             process.data.cond.notify_all();
                             break;
                         }
-                        
-                        // Find socket with matching port
-                        let mut matching_fd = None;
-                        {
-                            let table = process.data.fd_table.lock().unwrap();
-                            // First look for an accepted connection socket
-                            for (fd, entry) in table.entries.iter().enumerate() {
-                                if let Some(FDEntry::Socket { local_port, is_listener, .. }) = entry {
-                                    if *local_port == dest_port && !*is_listener {
-                                        matching_fd = Some(fd);
-                                        break;
+                    }
+                    if !found {
+                        error!("No process found with ID {} for FD update", process_id);
+                    }
+                },
+                2 => { // Init command.
+                    debug!("[BATCH] Processing init command for new process");
+                    let new_pid = get_next_pid();
+                    match process::start_process_from_bytes(payload, new_pid) {
+                        Ok(proc) => {
+                            processes.push(proc);
+                            info!("Added new process {} to scheduler", new_pid);
+                        }
+                        Err(e) => {
+                            error!("Failed to create new process {}: {}", new_pid, e);
+                        }
+                    }
+                },
+                3 => { // NetworkIn
+                    debug!("[BATCH] Processing NetworkIn for process {}", process_id);
+                    // The payload already contains the port + data
+                    // First 2 bytes are the destination port
+                    if payload.len() < 2 {
+                        error!("NetworkIn payload too short for process {}", process_id);
+                        continue;
+                    }
+                    
+                    let dest_port = (payload[0] as u16) | ((payload[1] as u16) << 8);
+                    let data = &payload[2..];
+                    
+                    debug!("Received {} bytes from network for process {} port {}: {}", data.len(), process_id, dest_port, String::from_utf8_lossy(data));
+                    
+                    let mut found = false;
+                    for process in processes.iter_mut() {
+                        if process.id == process_id {
+                            found = true;
+                            // If this is a success status message (port 0)
+                            if dest_port == 0 && data.len() >= 3 {
+                                let success = data[0] == 1;
+                                let src_port = (data[1] as u16) | ((data[2] as u16) << 8);
+                                if success {
+                                    info!("Network operation succeeded for process {}:{}", process_id, src_port);
+                                    // Update the runtime's NAT table to match consensus
+                                    let mut nat_table = process.data.nat_table.lock().unwrap();
+                                    nat_table.add_port_mapping(process_id, src_port);
+                                    // For accept operations, set the pending accept flag
+                                    let fd_table = process.data.fd_table.lock().unwrap();
+                                    for entry in fd_table.entries.iter() {
+                                        if let Some(FDEntry::Socket { local_port, .. }) = entry {
+                                            if *local_port == src_port {
+                                                nat_table.set_pending_accept(process_id, src_port);
+                                                break;
+                                            }
+                                        }
                                     }
+                                } else {
+                                    error!("Network operation failed for process {}:{}", process_id, src_port);
+                                    // For accept operations, ensure pending accept is false
+                                    let mut nat_table = process.data.nat_table.lock().unwrap();
+                                    nat_table.clear_pending_accept(process_id, src_port);
                                 }
+                                // Notify the process that the operation completed
+                                process.data.cond.notify_all();
+                                break;
                             }
-                            // If no accepted connection found, look for a listening socket
-                            if matching_fd.is_none() {
+                            
+                            // Find socket with matching port
+                            let mut matching_fd = None;
+                            {
+                                let table = process.data.fd_table.lock().unwrap();
+                                // First look for an accepted connection socket
                                 for (fd, entry) in table.entries.iter().enumerate() {
                                     if let Some(FDEntry::Socket { local_port, is_listener, .. }) = entry {
-                                        if *local_port == dest_port && *is_listener {
+                                        if *local_port == dest_port && !*is_listener {
                                             matching_fd = Some(fd);
                                             break;
                                         }
                                     }
                                 }
+                                // If no accepted connection found, look for a listening socket
+                                if matching_fd.is_none() {
+                                    for (fd, entry) in table.entries.iter().enumerate() {
+                                        if let Some(FDEntry::Socket { local_port, is_listener, .. }) = entry {
+                                            if *local_port == dest_port && *is_listener {
+                                                matching_fd = Some(fd);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                        }
-                        
-                        // If we found a matching socket, update it with the data
-                        if let Some(fd) = matching_fd {
-                            let mut table = process.data.fd_table.lock().unwrap();
-                            if let Some(Some(FDEntry::Socket { buffer, .. })) = table.entries.get_mut(fd) {
-                                buffer.extend_from_slice(data);
-                                info!("Added NetworkIn data to process {}'s socket FD {} ({} bytes)", 
-                                     process_id, fd, data.len());
+                            
+                            // If we found a matching socket, update it with the data
+                            if let Some(fd) = matching_fd {
+                                let mut table = process.data.fd_table.lock().unwrap();
+                                if let Some(Some(FDEntry::Socket { buffer, .. })) = table.entries.get_mut(fd) {
+                                    buffer.extend_from_slice(data);
+                                    info!("Added NetworkIn data to process {}'s socket FD {} ({} bytes)", 
+                                         process_id, fd, data.len());
+                                }
+                            } else {
+                                error!("No matching socket found for process {} port {}", process_id, dest_port);
                             }
-                        } else {
-                            error!("No matching socket found for process {} port {}", process_id, dest_port);
+                            
+                            // Notify waiting process
+                            process.data.cond.notify_all();
+                            break;
                         }
-                        
-                        // Notify waiting process
-                        process.data.cond.notify_all();
-                        break;
                     }
+                    
+                    if !found {
+                        error!("No process found with ID {} for NetworkIn", process_id);
+                    }
+                },
+                _ => {
+                    error!("Unknown message type: {}", msg_type);
                 }
-                
-                if !found {
-                    error!("No process found with ID {} for NetworkIn", process_id);
-                }
-            },
-            _ => {
-                error!("Unknown message type: {} in message", msg_type);
             }
         }
     }
-    Ok(true) // For pipe mode, we always return true to keep scheduler running
+    Ok(processed_any)
 }
 
 pub fn process_consensus_file(file_path: &str, processes: &mut Vec<process::Process>) -> Result<bool> {
