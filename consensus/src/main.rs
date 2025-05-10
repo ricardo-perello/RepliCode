@@ -7,6 +7,7 @@ mod test_client;
 mod netcat_client;
 mod image_client;
 mod dircopy_client;
+mod kv_client;
 
 use std::env;
 use std::io;
@@ -61,6 +62,10 @@ fn main() -> io::Result<()> {
         },
         "dircopy-client" => {
             dircopy_client::start_dircopy_client()?;
+            Ok(())
+        },
+        "kv-client" => {
+            kv_client::start_kv_client()?;
             Ok(())
         },
         _ => {
