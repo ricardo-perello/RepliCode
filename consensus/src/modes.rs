@@ -12,6 +12,7 @@ use bincode;
 use crate::record::write_record;
 use crate::commands::{parse_command, Command, NetworkOperation};
 use crate::nat::NatTable;
+use crate::http_server::HttpServer;
 
 pub fn run_benchmark_mode() -> io::Result<()> {
     let file_path = "consensus/consensus_input.bin";
@@ -120,6 +121,15 @@ pub fn run_tcp_mode() -> io::Result<()> {
 
     // Create NAT table for handling network operations
     let nat_table: Arc<Mutex<NatTable>> = Arc::new(Mutex::new(NatTable::new()));
+
+    // Start HTTP server for status information
+    let http_server = HttpServer::new(Arc::clone(&nat_table));
+    thread::spawn(move || {
+        if let Err(e) = http_server.start(8080) {
+            error!("HTTP server error: {}", e);
+        }
+    });
+    info!("HTTP status server started on port 8080");
 
     // Set the flush interval (e.g., every 10 seconds).
     let flush_interval = Duration::from_secs(10);

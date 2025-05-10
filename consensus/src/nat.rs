@@ -3,6 +3,7 @@ use std::net::{TcpStream, TcpListener};
 use std::io::{Write, Read};
 use log::{info, error, debug};
 use crate::commands::NetworkOperation;
+use serde_json::json;
 
 pub struct NatEntry {
     pub process_id: u64,
@@ -526,5 +527,75 @@ impl NatTable {
 
     pub fn has_connection(&self, pid: u64, port: u16) -> bool {
         self.connections.contains_key(&(pid, port))
+    }
+
+    pub fn get_process_info(&self) -> serde_json::Value {
+        let mut processes = HashMap::new();
+        
+        // Collect all unique process IDs
+        for &(pid, _) in self.process_ports.keys() {
+            if !processes.contains_key(&pid) {
+                let mut ports = Vec::new();
+                let mut listeners = Vec::new();
+                let mut connections = Vec::new();
+                
+                // Get all ports for this process
+                for &(p, port) in self.process_ports.keys() {
+                    if p == pid {
+                        ports.push(port);
+                        
+                        // Check if it's a listener
+                        if self.listeners.contains_key(&(pid, port)) {
+                            listeners.push(port);
+                        }
+                        
+                        // Check if it's a connection
+                        if self.connections.contains_key(&(pid, port)) {
+                            connections.push(port);
+                        }
+                    }
+                }
+                
+                processes.insert(pid, json!({
+                    "ports": ports,
+                    "listeners": listeners,
+                    "connections": connections
+                }));
+            }
+        }
+        
+        json!(processes)
+    }
+
+    pub fn get_connection_info(&self) -> serde_json::Value {
+        let mut connections = Vec::new();
+        
+        for (consensus_port, entry) in &self.port_mappings {
+            if self.connections.contains_key(&(entry.process_id, entry.process_port)) {
+                connections.push(json!({
+                    "process_id": entry.process_id,
+                    "process_port": entry.process_port,
+                    "consensus_port": consensus_port,
+                    "buffer_size": entry.buffer.len()
+                }));
+            }
+        }
+        
+        json!(connections)
+    }
+
+    pub fn get_listener_info(&self) -> serde_json::Value {
+        let mut listeners = Vec::new();
+        
+        for ((pid, port), listener) in &self.listeners {
+            listeners.push(json!({
+                "process_id": pid,
+                "process_port": port,
+                "consensus_port": listener.consensus_port,
+                "pending_accepts": listener.pending_accepts.len()
+            }));
+        }
+        
+        json!(listeners)
     }
 } 

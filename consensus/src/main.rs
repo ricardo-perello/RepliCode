@@ -8,6 +8,7 @@ mod netcat_client;
 mod image_client;
 mod dircopy_client;
 mod kv_client;
+mod http_server;
 
 use std::env;
 use std::io;
