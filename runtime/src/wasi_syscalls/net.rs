@@ -209,9 +209,11 @@ pub fn wasi_sock_listen(
     {
         let process_data = caller.data();
         pid = process_data.id;
+        debug!("Processing listen request for process {}", pid);
         let table = process_data.fd_table.lock().unwrap();
         if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, .. })) = table.entries.get(fd as usize) {
             src_port = *local_port;
+            debug!("Found socket FD {} for process {}:{}", fd, pid, src_port);
         } else {
             error!("Invalid socket FD {} for process {}", fd, pid);
             return 1; // Invalid FD
@@ -224,6 +226,7 @@ pub fn wasi_sock_listen(
         let op = NetworkOperation::Listen {
             src_port,
         };
+        debug!("Creating listen operation for process {}:{}", pid, src_port);
         
         process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
             pid,
@@ -239,6 +242,7 @@ pub fn wasi_sock_listen(
     // Check if the listen operation succeeded by verifying the NAT mapping exists
     let listen_succeeded = {
         let process_data = caller.data();
+        debug!("Checking if listen operation succeeded for process {}:{}", pid, src_port);
         process_data.nat_table.lock().unwrap().has_port_mapping(pid, src_port)
     };
 
@@ -246,9 +250,11 @@ pub fn wasi_sock_listen(
         // Mark the socket as a listener
         {
             let process_data = caller.data();
+            debug!("Marking socket {} as listener for process {}:{}", fd, pid, src_port);
             let mut table = process_data.fd_table.lock().unwrap();
             if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { is_listener, .. })) = table.entries.get_mut(fd as usize) {
                 *is_listener = true;
+                debug!("Socket {} marked as listener", fd);
             }
         }
         info!("Listen operation succeeded for process {}:{}", pid, src_port);
@@ -273,9 +279,11 @@ pub fn wasi_sock_accept(
     {
         let process_data = caller.data();
         pid = process_data.id;
+        debug!("Processing accept request for process {}", pid);
         let table = process_data.fd_table.lock().unwrap();
         if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, .. })) = table.entries.get(fd as usize) {
             src_port = *local_port;
+            debug!("Found socket FD {} for process {}:{}", fd, pid, src_port);
         } else {
             error!("Invalid socket FD {} for process {}", fd, pid);
             return 1; // Invalid FD
@@ -285,6 +293,7 @@ pub fn wasi_sock_accept(
     // Preallocate FD and port for the accepted connection
     let (new_fd, new_port) = {
         let process_data = caller.data();
+        debug!("Preallocating resources for accepted connection");
         let mut table = process_data.fd_table.lock().unwrap();
         let new_fd = table.allocate_fd();
         if new_fd < 0 {
@@ -296,9 +305,10 @@ pub fn wasi_sock_accept(
             *port += 1;
             *port
         };
+        debug!("Allocated new FD {} and port {} for accepted connection", new_fd, new_port);
         table.entries[new_fd as usize] = Some(crate::runtime::fd_table::FDEntry::Socket {
             local_port: new_port,
-            connected: true,
+            connected: false,  // Start as not connected, will be set to true when connection is established
             is_listener: false,  // Accepted connections are never listeners
             buffer: Vec::new(),
         });
@@ -312,6 +322,7 @@ pub fn wasi_sock_accept(
             src_port,
             new_port,
         };
+        debug!("Creating accept operation for process {}:{} -> new port {}", pid, src_port, new_port);
         
         process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
             pid,
@@ -327,7 +338,20 @@ pub fn wasi_sock_accept(
     // Check if we got a connection
     let has_connection = {
         let process_data = caller.data();
-        process_data.nat_table.lock().unwrap().has_connection(pid, new_port)
+        debug!("Checking if connection was established for process {}:{}", pid, new_port);
+        let nat_table = process_data.nat_table.lock().unwrap();
+        let fd_table = process_data.fd_table.lock().unwrap();
+        
+        // Check both NAT table and FD table
+        let nat_connected = nat_table.has_connection(pid, new_port);
+        let fd_connected = if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { connected, .. })) = fd_table.entries.get(new_fd as usize) {
+            *connected
+        } else {
+            false
+        };
+        
+        debug!("Connection status - NAT: {}, FD: {}", nat_connected, fd_connected);
+        nat_connected || fd_connected
     };
 
     if has_connection {
@@ -346,10 +370,23 @@ pub fn wasi_sock_accept(
             return 1; // EINVAL
         }
         mem_mut[out_ptr..out_ptr+4].copy_from_slice(&(new_fd as u32).to_le_bytes());
+        debug!("Wrote new FD {} to memory at offset {}", new_fd, out_ptr);
+
+        // Mark the socket as connected
+        {
+            let process_data = caller.data();
+            debug!("Marking socket {} as connected for process {}:{}", new_fd, pid, new_port);
+            let mut table = process_data.fd_table.lock().unwrap();
+            if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { connected, .. })) = table.entries.get_mut(new_fd as usize) {
+                *connected = true;
+                debug!("Socket {} marked as connected", new_fd);
+            }
+        }
 
         // Clear the pending accept
         {
             let process_data = caller.data();
+            debug!("Clearing pending accept for process {}:{}", pid, src_port);
             process_data.nat_table.lock().unwrap().clear_waiting_accept(pid, src_port);
         }
 
@@ -359,6 +396,7 @@ pub fn wasi_sock_accept(
         // Revert the port allocation and FD
         {
             let process_data = caller.data();
+            debug!("Reverting resource allocation for failed accept");
             let mut table = process_data.fd_table.lock().unwrap();
             table.entries[new_fd as usize] = None;  // Free the FD
             let mut port = process_data.next_port.lock().unwrap();

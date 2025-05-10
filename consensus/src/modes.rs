@@ -192,14 +192,14 @@ pub fn run_tcp_mode() -> io::Result<()> {
                 match bincode::deserialize::<NetworkOperation>(&payload) {
                     Ok(op) => {
                         debug!("Received network operation from runtime for process {}: {:?}", pid, op);
-                        // Get source port and operation type before moving op
-                        let (src_port, is_accept) = match &op {
-                            NetworkOperation::Connect { src_port, .. } => (*src_port, false),
-                            NetworkOperation::Send { src_port, .. } => (*src_port, false),
-                            NetworkOperation::Listen { src_port } => (*src_port, false),
-                            NetworkOperation::Accept { src_port, .. } => (*src_port, true),
-                            NetworkOperation::Close { src_port } => (*src_port, false),
-                            NetworkOperation::Recv { src_port } => (*src_port, false),
+                        // Get source port, new port, and operation type before moving op
+                        let (src_port, new_port, is_accept) = match &op {
+                            NetworkOperation::Connect { src_port, .. } => (*src_port, 0, false),
+                            NetworkOperation::Send { src_port, .. } => (*src_port, 0, false),
+                            NetworkOperation::Listen { src_port } => (*src_port, 0, false),
+                            NetworkOperation::Accept { src_port, new_port, .. } => (*src_port, *new_port, true),
+                            NetworkOperation::Close { src_port } => (*src_port, 0, false),
+                            NetworkOperation::Recv { src_port } => (*src_port, 0, false),
                         };
                         match nat_table_clone.lock().unwrap().handle_network_operation(pid, op) {
                             Ok(success) => {
@@ -212,7 +212,11 @@ pub fn run_tcp_mode() -> io::Result<()> {
                                 } else {
                                     0 // Failure
                                 };
-                                if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![status, src_port as u8, (src_port >> 8) as u8])) {
+                                if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![
+                                    status, 
+                                    src_port as u8, (src_port >> 8) as u8,
+                                    new_port as u8, (new_port >> 8) as u8
+                                ])) {
                                     buf.extend(record);
                                 }
                             }
@@ -247,7 +251,11 @@ pub fn run_tcp_mode() -> io::Result<()> {
                     if is_connection {
                         // Send a connection notification (status 1 for success)
                         debug!("Notifying runtime about new connection for process {} port {}", pid, port);
-                        if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![1, port as u8, (port >> 8) as u8])) {
+                        if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![
+                            1,  // Success status
+                            port as u8, (port >> 8) as u8,  // Listening port
+                            (port + 1) as u8, ((port + 1) >> 8) as u8  // New port (listening port + 1)
+                        ])) {
                             buf.extend(record);
                         }
                     } else if !data.is_empty() {

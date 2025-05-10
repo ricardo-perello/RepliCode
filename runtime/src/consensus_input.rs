@@ -177,18 +177,46 @@ pub fn process_consensus_pipe<R: Read + Write>(
                     if process.id == process_id {
                         found = true;
                         // If this is a success status message (port 0)
-                        if dest_port == 0 && data.len() >= 3 {
+                        if dest_port == 0 && data.len() >= 5 {  // Now we expect at least 5 bytes
                             let status = data[0];
                             let src_port = (data[1] as u16) | ((data[2] as u16) << 8);
+                            let new_port = (data[3] as u16) | ((data[4] as u16) << 8);
                             match status {
                                 1 => { // Success
-                                info!("Network operation succeeded for process {}:{}", process_id, src_port);
-                                // Update the runtime's NAT table to match consensus
-                                let mut nat_table = process.data.nat_table.lock().unwrap();
-                                nat_table.add_port_mapping(process_id, src_port);
-                                    // For accept operations, process any pending connection
-                                    if data.len() >= 4 && data[3] == 1 { // Accept operation
-                                        nat_table.process_pending_accept(process_id, src_port);
+                                    info!("Network operation succeeded for process {}:{}", process_id, src_port);
+                                    // Update the runtime's NAT table to match consensus
+                                    let mut nat_table = process.data.nat_table.lock().unwrap();
+                                    if new_port != 0 {  // This is an accept operation
+                                        debug!("Processing accept success for process {}:{} -> {}", process_id, src_port, new_port);
+                                        // Add mapping for the new port
+                                        nat_table.add_port_mapping(process_id, new_port);
+                                        // Mark the socket as connected
+                                        let mut table = process.data.fd_table.lock().unwrap();
+                                        debug!("Looking for socket with port {} in FD table (size: {})", new_port, table.entries.len());
+                                        // Find the socket with matching port
+                                        let mut found = false;
+                                        for (fd, entry) in table.entries.iter_mut().enumerate() {
+                                            if let Some(FDEntry::Socket { local_port, connected, .. }) = entry {
+                                                if *local_port == new_port {
+                                                    *connected = true;
+                                                    debug!("Marked socket FD {} as connected for process {}:{}", fd, process_id, new_port);
+                                                    found = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if !found {
+                                            error!("Could not find socket with port {} in FD table for process {}", new_port, process_id);
+                                            // Debug: Print all socket entries
+                                            for (fd, entry) in table.entries.iter().enumerate() {
+                                                if let Some(FDEntry::Socket { local_port, is_listener, connected, .. }) = entry {
+                                                    debug!("FD {}: port={}, is_listener={}, connected={}", fd, local_port, is_listener, connected);
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // Regular operation, just add mapping for src_port
+                                        nat_table.add_port_mapping(process_id, src_port);
                                     }
                                     // Clear the waiting state
                                     nat_table.clear_waiting_accept(process_id, src_port);
