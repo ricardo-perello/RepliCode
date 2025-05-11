@@ -103,6 +103,8 @@ impl TcpMode {
     fn start_runtime_reader(&self) -> io::Result<()> {
         debug!("Initializing runtime reader thread");
         let runtime_manager = self.runtime_manager.clone();
+        let nat_table = Arc::clone(&self.nat_table);
+        let shared_buffer = Arc::clone(&self.shared_buffer);
         thread::spawn(move || {
             info!("Runtime reader thread started");
             loop {
@@ -207,8 +209,29 @@ impl TcpMode {
                                         NetworkOperation::Close { src_port } => (*src_port, 0, false, false),
                                         NetworkOperation::Recv { src_port } => (*src_port, 0, false, true),
                                     };
-                                    // Process the network operation as before
-                                    // ... (rest of the original logic)
+
+                                    // Process the network operation
+                                    let mut nat_table = nat_table.lock().unwrap();
+                                    let success = match nat_table.handle_network_operation(pid, op.clone()) {
+                                        Ok(success) => success,
+                                        Err(e) => {
+                                            error!("Failed to handle network operation: {}", e);
+                                            false
+                                        }
+                                    };
+
+                                    // Add success/failure message to batch
+                                    let mut buf = shared_buffer.lock().unwrap();
+                                    if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![
+                                        if success { 1 } else { 0 },  // Success status
+                                        src_port as u8, (src_port >> 8) as u8,  // Source port
+                                        if is_accept { new_port as u8 } else { 0 },  // New port for accept
+                                        if is_accept { (new_port >> 8) as u8 } else { 0 }  // New port high byte
+                                    ])) {
+                                        buf.extend(record);
+                                        info!("Added network operation result for process {}:{} (success: {})", 
+                                            pid, src_port, success);
+                                    }
                                 } else {
                                     error!("Failed to deserialize network operation from runtime {}", runtime_id);
                                 }
