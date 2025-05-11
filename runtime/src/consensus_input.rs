@@ -15,6 +15,7 @@ use consensus::commands::NetworkOperation;
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 // Track file position for consensus file
 static FILE_POSITION: AtomicU64 = AtomicU64::new(0);
+static OUTGOING_BATCH_NUMBER: AtomicU64 = AtomicU64::new(1);
 
 fn get_next_pid() -> u64 {
     NEXT_PID.fetch_add(1, Ordering::SeqCst)
@@ -41,66 +42,105 @@ pub fn process_consensus_pipe<R: Read + Write>(
     debug!("Processing consensus pipe with {} outgoing messages", outgoing_messages.len());
     let mut reader = BufReader::new(consensus_pipe);
 
-    // First, send any outgoing network messages
-    for msg in outgoing_messages {
-        debug!("Sending outgoing network message for process {}: {:?}", msg.pid, msg.operation);
-        // Write message type (NetworkOut = 5)
-        reader.get_mut().write_all(&[5])?;
-        
-        // Write process ID
-        reader.get_mut().write_all(&msg.pid.to_le_bytes())?;
-        
-        // Serialize and write the network operation
-        let op_bytes = bincode::serialize(&msg.operation)?;
-        reader.get_mut().write_all(&(op_bytes.len() as u32).to_le_bytes())?;
-        reader.get_mut().write_all(&op_bytes)?;
+    // First, send any outgoing network messages as a batch
+    if !outgoing_messages.is_empty() {
+        let batch_number = OUTGOING_BATCH_NUMBER.fetch_add(1, Ordering::SeqCst);
+        let direction = 1u8; // Outgoing
+        let mut batch_data = Vec::new();
+        for msg in outgoing_messages {
+            debug!("Sending outgoing network message for process {}: {:?}", msg.pid, msg.operation);
+            // Write message type (NetworkOut = 5)
+            batch_data.push(5);
+            // Write process ID
+            batch_data.extend_from_slice(&msg.pid.to_le_bytes());
+            // Serialize and write the network operation
+            let op_bytes = bincode::serialize(&msg.operation)?;
+            batch_data.extend_from_slice(&(op_bytes.len() as u32).to_le_bytes());
+            batch_data.extend_from_slice(&op_bytes);
+        }
+        // Write batch header
+        reader.get_mut().write_all(&batch_number.to_le_bytes())?;
+        reader.get_mut().write_all(&[direction])?;
+        reader.get_mut().write_all(&(batch_data.len() as u64).to_le_bytes())?;
+        // Write batch data
+        reader.get_mut().write_all(&batch_data)?;
+        debug!("Sent outgoing batch {} ({} bytes)", batch_number, batch_data.len());
     }
 
+    // Read batch header (8 bytes for batch number, 1 byte for direction)
+    let mut batch_header = [0u8; 9];
+    if reader.read_exact(&mut batch_header).is_err() {
+        debug!("No batch header in consensus pipe");
+        return Ok(false);
+    }
+
+    let batch_number = u64::from_le_bytes(batch_header[0..8].try_into().unwrap());
+    let direction = batch_header[8];
+    debug!("Received batch {} with direction {}", batch_number, direction);
+
+    // Read batch data length (8 bytes)
+    let mut data_len_buf = [0u8; 8];
+    if reader.read_exact(&mut data_len_buf).is_err() {
+        error!("Failed to read batch data length");
+        return Ok(false);
+    }
+    let data_len = u64::from_le_bytes(data_len_buf) as usize;
+    debug!("Batch {} data length: {} bytes", batch_number, data_len);
+
+    // Read the batch data
+    let mut batch_data = vec![0u8; data_len];
+    if reader.read_exact(&mut batch_data).is_err() {
+        error!("Failed to read batch data");
+        return Ok(false);
+    }
+
+    // Process the batch data as a series of records
+    let mut data_reader = std::io::Cursor::new(batch_data);
     loop {
         // Read the message type (1 byte)
         let mut msg_type_buf = [0u8; 1];
-        if reader.read_exact(&mut msg_type_buf).is_err() {
-            debug!("No more data in consensus pipe");
+        if data_reader.read_exact(&mut msg_type_buf).is_err() {
+            debug!("No more records in batch {}", batch_number);
             break; // No more data.
         }
         let msg_type = msg_type_buf[0];
-        debug!("Received message type {} from consensus pipe", msg_type);
+        debug!("Processing record type {} in batch {}", msg_type, batch_number);
 
         // Read process_id (8 bytes)
-        let process_id = match reader.read_u64::<LittleEndian>() {
+        let process_id = match data_reader.read_u64::<LittleEndian>() {
             Ok(pid) => pid,
             Err(_) => break,
         };
 
         // Read payload length (4 bytes)
-        let payload_len = match reader.read_u32::<LittleEndian>() {
+        let payload_len = match data_reader.read_u32::<LittleEndian>() {
             Ok(sz) => sz as usize,
             Err(_) => break,
         };
 
-        debug!("Reading payload of {} bytes for process {}", payload_len, process_id);
+        debug!("Reading payload of {} bytes for process {} in batch {}", payload_len, process_id, batch_number);
 
         // Read the payload.
         let mut payload = vec![0u8; payload_len];
-        if let Err(e) = reader.read_exact(&mut payload) {
-            error!("Failed to read message from pipe: {}", e);
+        if let Err(e) = data_reader.read_exact(&mut payload) {
+            error!("Failed to read message from batch {}: {}", batch_number, e);
             break;
         }
 
         match msg_type {
             0 => { // Clock update.
                 let msg_str = String::from_utf8_lossy(&payload);
-                debug!("Processing clock update: {}", msg_str);
+                debug!("Processing clock update in batch {}: {}", batch_number, msg_str);
                 if let Some(delta_str) = msg_str.strip_prefix("clock:") {
                     match delta_str.trim().parse::<u64>() {
                         Ok(delta) => {
                             GlobalClock::increment(delta);
-                            info!("Global clock incremented by {}", delta);
+                            info!("Global clock incremented by {} in batch {}", delta, batch_number);
                         }
-                        Err(e) => error!("Invalid clock increment in pipe: {}", e),
+                        Err(e) => error!("Invalid clock increment in batch {}: {}", batch_number, e),
                     }
                 } else {
-                    error!("Invalid clock message format in pipe: {}", msg_str);
+                    error!("Invalid clock message format in batch {}: {}", batch_number, msg_str);
                 }
                 break; // End of batch.
             },
