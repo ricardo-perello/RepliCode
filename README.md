@@ -14,7 +14,8 @@ This project integrates **Wasmtime**, a WebAssembly runtime, and extends it with
 - **Deterministic I/O**: File operations, sockets, and system calls behave consistently across all nodes  
 - **Replicated Execution**: All nodes execute the same state transitions in lockstep  
 - **Integration with Consensus Mechanisms** to ensure verifiable execution  
-- **Future Work**: Support for **multi-threading, networking, and filesystem access** in a deterministic manner  
+- **Network Layer**: Deterministic socket operations and connection management
+- **Future Work**: Support for **multi-threading and advanced filesystem access** in a deterministic manner  
 
 ---
 
@@ -23,27 +24,34 @@ This project integrates **Wasmtime**, a WebAssembly runtime, and extends it with
 - **Runtime:** Wasmtime  
 - **WebAssembly Compilation:** Clang + WASI SDK  
 - **Target Environment:** Linux/macOS  
-- **Consensus Mechanism (Future Work):** Blockchain-based replication  
+- **Consensus Mechanism:** Blockchain-based replication  
 
 ---
 
 ## **Project Structure**
 ```
 RepliCode/
-│── runtime/              # Rust runtime implementation
-│   ├── src/              # Rust source files
-│   ├── Cargo.toml        # Rust package configuration
-│   ├── main.rs           # Entry point for the runtime
-│── wasm_programs/        # C programs compiled to WASM
-│   ├── hello.c           # Sample C program for testing
-│   ├── Makefile          # C to WASM build automation
-│   ├── build/            # Compiled WASM binaries
-│── docs/                 # Documentation
-│   ├── design.md         # Design decisions and architecture
-│   ├── research.md       # Notes on deterministic execution  
-│── tests/                # Test cases for runtime validation
-│── .gitignore            # Ignore compiled artifacts
-│── README.md             # Project overview
+│── consensus/            # Consensus layer implementation
+│   ├── src/             # Consensus source files
+│   ├── Cargo.toml       # Consensus package configuration
+│   └── consensus_input.bin  # Consensus input data
+│── runtime/             # Rust runtime implementation
+│   ├── src/             # Runtime source files
+│   └── Cargo.toml       # Runtime package configuration
+│── wasi_sandbox/        # WASI sandbox environment
+│   ├── pid_2/          # Process-specific sandbox
+│   └── standard1/      # Standard sandbox configuration
+│── wasm_programs/       # C programs compiled to WASM
+│   ├── hello.c         # Sample C program for testing
+│   ├── Makefile        # C to WASM build automation
+│   └── build/          # Compiled WASM binaries
+│── docs/               # Documentation
+│   ├── design.md       # Design decisions and architecture
+│   └── research.md     # Notes on deterministic execution  
+│── Cargo.toml          # Root package configuration
+│── Cargo.lock          # Dependency lock file
+│── .gitignore         # Git ignore rules
+│── README.md          # Project overview
 ```
 
 ---
@@ -74,46 +82,53 @@ This generates `build/hello.wasm`.
 ---
 
 ### **3️⃣ Run the WASM Program in RepliCode**
+
+First, start the consensus layer:
 ```sh
-cd runtime
-cargo run
+cargo run --bin consensus tcp
 ```
-This executes `hello.wasm` inside the RepliCode runtime.
+
+Then, in separate terminals, start multiple runtime instances:
+```sh
+# Terminal 1
+cargo run --bin runtime tcp
+
+# Terminal 2
+cargo run --bin runtime tcp
+
+# Terminal 3 (and so on...)
+cargo run --bin runtime tcp
+```
+
+This will execute the WASM program inside the RepliCode runtime with multiple replicas.
 
 ---
 
-## **Development Roadmap**
-### **Phase 1: Core Runtime (In Progress)**
+## **Development Status**
+### **Phase 1: Core Runtime (Completed)**
 ✅ Execute a C program compiled to WASM  
 ✅ Build a minimal Rust-based WASM runtime  
 ✅ Capture and handle system calls  
+✅ Basic consensus layer implementation
 
-### **Phase 2: Extended POSIX Support**  
-🔲 Implement deterministic file I/O  
-🔲 Integrate socket-based communication  
-🔲 Develop a replicated system call layer  
+### **Phase 2: Extended POSIX Support (Completed)**  
+✅ Implement deterministic file I/O  
+✅ Integrate socket-based communication  
+✅ Develop a replicated system call layer  
+✅ TCP-based consensus communication
 
-### **Phase 3: Multi-Threading & Networking**  
+
+### **Phase 3: Multi-Threading & Networking (Planned)**  
 🔲 Support for POSIX threads (`pthreads`)  
-🔲 Network stack integration  
+🔲 Advanced network stack integration  
 🔲 Performance optimizations  
+🔲 Fault tolerance mechanisms
 
 ---
 
-## **References & Documentation**
-- [Rust Programming Language](https://www.rust-lang.org/)  
-- [Wasmtime WebAssembly Runtime](https://wasmtime.dev/)  
-- [WebAssembly and WASI](https://webassembly.org/)  
-- [POSIX Standard](https://pubs.opengroup.org/onlinepubs/9699919799/)  
+## **Network Architecture**
 
----
-
-## **Networking & Socket Implementation**
-
-### **Network Architecture**
-RepliCode implements a deterministic networking layer that ensures consistent behavior across all nodes. The system uses a NAT (Network Address Translation) table to manage connections and port mappings.
-
-#### **Key Components**
+### **Key Components**
 - **NAT Table**: Manages port mappings and connection state
 - **Socket Operations**: Implements WASI socket functions
 - **Network Batching**: Handles message batching for consensus
@@ -142,22 +157,6 @@ wasi_sock_send(fd, data, flags) -> bytes_sent
 wasi_sock_recv(fd, buffer, flags) -> bytes_received
 ```
 
-### **NAT Table Implementation**
-The NAT table (`NatTable`) manages:
-- Port mappings between processes
-- Pending accept operations
-- Connection state tracking
-- Network operation queuing
-
-```rust
-struct NatTable {
-    port_mappings: HashMap<(u64, u16), u16>,  // (pid, src_port) -> consensus_port
-    process_ports: HashMap<(u64, u16), u16>,  // (pid, src_port) -> consensus_port
-    listeners: HashMap<(u64, u16), NatListener>,
-    pending_accepts: HashMap<(u64, u16), bool>,
-}
-```
-
 ### **Network Operation Flow**
 1. **Socket Creation**
    - Process requests new socket via `wasi_sock_open`
@@ -171,57 +170,19 @@ struct NatTable {
 
 3. **Accepting Connections**
    - Process calls `wasi_sock_accept`
-   - Runtime preallocates new FD and port for the connection
-   - If accept succeeds:
-     - New socket is created with preallocated port
-     - Connection is established
-   - If accept fails:
-     - Preallocated FD is freed
-     - Port counter is reverted
-     - Returns EAGAIN for retry
+   - Runtime preallocates new FD and port
+   - Connection establishment with proper error handling
 
-4. **Sending Data**
-   - Process calls `wasi_sock_send`
-   - Runtime queues operation
-   - Consensus processes and routes data
-
-5. **Receiving Data**
-   - Data arrives via consensus
-   - Runtime routes to correct socket based on port mapping
-   - Process reads via `wasi_sock_recv`
-
-### **Port Management**
-The system implements deterministic port allocation:
-- Each process maintains its own port counter
-- Ports are preallocated for accept operations
-- Failed accepts trigger port counter reversion
-- Port mappings ensure consistent routing across nodes
-
-### **Message Batching**
-The system uses a batching mechanism for network operations:
-
-1. **Outgoing Messages**
-   - Network operations are queued
-   - Batched with other operations
-   - Sent to consensus in batches
-
-2. **Incoming Messages**
-   - Consensus sends batched responses
-   - Runtime processes each message
-   - Updates appropriate socket buffers
+4. **Data Transfer**
+   - Sending: Operations are queued and batched
+   - Receiving: Data routed through consensus layer
+   - Proper error handling for connection states
 
 ### **Error Handling**
 Common error codes:
 - `EINVAL` (1): Invalid arguments
 - `EAGAIN` (11): Resource temporarily unavailable
 - `EMFILE` (76): Too many open files
-
-### **Deterministic Execution**
-The networking layer ensures determinism by:
-- Consistent port allocation
-- Ordered message processing
-- Synchronized state updates
-- Atomic operation handling
 
 ---
 
