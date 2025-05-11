@@ -2,6 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 // WASI socket functions
 __attribute__((import_module("wasi_snapshot_preview1")))
@@ -27,31 +30,6 @@ int sock_send(int sock_fd, const void* si_data, int si_data_len, int si_flags, i
 __attribute__((import_module("wasi_snapshot_preview1")))
 __attribute__((import_name("sock_shutdown")))
 int sock_shutdown(int sock_fd, int how);
-
-// WASI file syscalls
-__attribute__((import_module("env")))
-__attribute__((import_name("file_create")))
-int file_create(const char* path, int path_len, int* fd_out);
-
-__attribute__((import_module("wasi_snapshot_preview1")))
-__attribute__((import_name("path_open")))
-int path_open(int dirfd, int dirflags, const char* path, int path_len, int oflags, long fs_rights_base, long fs_rights_inheriting, int fdflags, int* fd_out);
-
-__attribute__((import_module("wasi_snapshot_preview1")))
-__attribute__((import_name("fd_write")))
-int fd_write(int fd, const void* iovs, int iovs_len, int* nwritten);
-
-__attribute__((import_module("wasi_snapshot_preview1")))
-__attribute__((import_name("fd_read")))
-int fd_read(int fd, void* iovs, int iovs_len, int* nread);
-
-__attribute__((import_module("wasi_snapshot_preview1")))
-__attribute__((import_name("fd_close")))
-int fd_close(int fd);
-
-__attribute__((import_module("wasi_snapshot_preview1")))
-__attribute__((import_name("path_unlink_file")))
-int path_unlink_file(int dirfd, const char* path, int path_len);
 
 #define BUF_SIZE 4096
 #define MAX_KEY 128
@@ -163,26 +141,19 @@ void handle_client(int client_fd) {
 }
 
 int set_key(const char* key, const char* value) {
-    int fd;
-    if (file_create(key, strlen(key), &fd) != 0) {
-        // Try to open existing file for write
-        if (path_open(3, 0, key, strlen(key), 0x1, 0x1, 0, 0, &fd) != 0) return -1;
-    }
-    struct { void* buf; int len; } iov = { (void*)value, strlen(value) };
-    int nwritten = 0;
-    int ret = fd_write(fd, &iov, 1, &nwritten);
-    fd_close(fd);
-    return (ret == 0 && nwritten == (int)strlen(value)) ? 0 : -1;
+    int fd = open(key, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) return -1;
+    ssize_t nwritten = write(fd, value, strlen(value));
+    close(fd);
+    return (nwritten == (ssize_t)strlen(value)) ? 0 : -1;
 }
 
 int get_key(const char* key, char* value_out, int maxlen) {
-    int fd;
-    if (path_open(3, 0, key, strlen(key), 0, 0x1, 0, 0, &fd) != 0) return -1;
-    struct { void* buf; int len; } iov = { value_out, maxlen-1 };
-    int nread = 0;
-    int ret = fd_read(fd, &iov, 1, &nread);
-    fd_close(fd);
-    if (ret == 0 && nread > 0) {
+    int fd = open(key, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t nread = read(fd, value_out, maxlen-1);
+    close(fd);
+    if (nread > 0) {
         value_out[nread] = 0;
         return 0;
     }
@@ -190,5 +161,5 @@ int get_key(const char* key, char* value_out, int maxlen) {
 }
 
 int del_key(const char* key) {
-    return path_unlink_file(3, key, strlen(key));
+    return unlink(key);
 } 

@@ -3,6 +3,10 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <dirent.h>
 
 // WASI socket functions
 __attribute__((import_module("wasi_snapshot_preview1")))
@@ -28,35 +32,6 @@ int sock_send(int sock_fd, const void* si_data, int si_data_len, int si_flags, i
 __attribute__((import_module("wasi_snapshot_preview1")))
 __attribute__((import_name("sock_shutdown")))
 int sock_shutdown(int sock_fd, int how);
-
-// WASI file/directory syscalls
-__attribute__((import_module("wasi_snapshot_preview1")))
-__attribute__((import_name("path_open")))
-int path_open(int dirfd, int dirflags, const char* path, int path_len, int oflags, long fs_rights_base, long fs_rights_inheriting, int fdflags, int* fd_out);
-
-__attribute__((import_module("wasi_snapshot_preview1")))
-__attribute__((import_name("fd_readdir")))
-int fd_readdir(int fd, void* buf, int buf_len, long cookie, int bufused_out);
-
-__attribute__((import_module("wasi_snapshot_preview1")))
-__attribute__((import_name("fd_read")))
-int fd_read(int fd, void* iovs, int iovs_len, int* nread);
-
-__attribute__((import_module("wasi_snapshot_preview1")))
-__attribute__((import_name("fd_write")))
-int fd_write(int fd, const void* iovs, int iovs_len, int* nwritten);
-
-__attribute__((import_module("env")))
-__attribute__((import_name("file_create")))
-int file_create(const char* path, int path_len, int* fd_out);
-
-__attribute__((import_module("wasi_snapshot_preview1")))
-__attribute__((import_name("path_create_directory")))
-int path_create_directory(int dirfd, const char* path, int path_len);
-
-__attribute__((import_module("wasi_snapshot_preview1")))
-__attribute__((import_name("fd_close")))
-int fd_close(int fd);
 
 #define BUF_SIZE 4096
 #define MAX_PATH 256
@@ -127,68 +102,48 @@ void handle_client(int client_fd) {
 // Recursively copy a directory
 int copy_dir(const char* src, const char* dst) {
     // Create destination directory
-    if (path_create_directory(3, dst, strlen(dst)) != 0) {
+    if (mkdir(dst, 0777) != 0) {
         // Might already exist, that's ok
     }
     // Open source directory
-    int src_fd;
-    if (path_open(3, 0, src, strlen(src), 0, 0x1, 0, 0, &src_fd) != 0) return -1;
-    char buf[BUF_SIZE];
-    int bufused = 0;
-    struct { void* buf; int len; } iov = { buf, BUF_SIZE };
-    // Read directory entries (simple: one per line)
-    while (1) {
-        int ret = fd_read(src_fd, &iov, 1, &bufused);
-        if (ret != 0 || bufused <= 0) break;
-        int start = 0;
-        for (int i = 0; i < bufused; ++i) {
-            if (buf[i] == '\n') {
-                buf[i] = 0;
-                char* entry = buf + start;
-                if (strcmp(entry, ".") != 0 && strcmp(entry, "..") != 0) {
-                    char src_path[MAX_PATH], dst_path[MAX_PATH];
-                    snprintf(src_path, MAX_PATH, "%s/%s", src, entry);
-                    snprintf(dst_path, MAX_PATH, "%s/%s", dst, entry);
-                    // Check if entry is a directory or file
-                    int entry_fd;
-                    if (path_open(3, 0, src_path, strlen(src_path), 0, 0x1, 0, 0, &entry_fd) == 0) {
-                        // Try reading as directory
-                        int test_bufused = 0;
-                        struct { void* buf; int len; } test_iov = { buf, BUF_SIZE };
-                        int is_dir = (fd_read(entry_fd, &test_iov, 1, &test_bufused) == 0 && test_bufused > 0);
-                        fd_close(entry_fd);
-                        if (is_dir) {
-                            copy_dir(src_path, dst_path);
-                        } else {
-                            copy_file(src_path, dst_path);
-                        }
-                    }
-                }
-                start = i+1;
+    DIR* src_dir = opendir(src);
+    if (!src_dir) return -1;
+    struct dirent* entry;
+    while ((entry = readdir(src_dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        char src_path[MAX_PATH], dst_path[MAX_PATH];
+        snprintf(src_path, MAX_PATH, "%s/%s", src, entry->d_name);
+        snprintf(dst_path, MAX_PATH, "%s/%s", dst, entry->d_name);
+        struct stat st;
+        if (stat(src_path, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                copy_dir(src_path, dst_path);
+            } else if (S_ISREG(st.st_mode)) {
+                copy_file(src_path, dst_path);
             }
         }
     }
-    fd_close(src_fd);
+    closedir(src_dir);
     return 0;
 }
 
 // Copy a single file
 int copy_file(const char* src, const char* dst) {
-    int src_fd;
-    if (path_open(3, 0, src, strlen(src), 0, 0x1, 0, 0, &src_fd) != 0) return -1;
-    int dst_fd;
-    if (file_create(dst, strlen(dst), &dst_fd) != 0) { fd_close(src_fd); return -1; }
+    int src_fd = open(src, O_RDONLY);
+    if (src_fd < 0) return -1;
+    int dst_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (dst_fd < 0) { close(src_fd); return -1; }
     char buf[BUF_SIZE];
-    int nread = 0;
-    struct { void* buf; int len; } iov = { buf, BUF_SIZE };
-    while (fd_read(src_fd, &iov, 1, &nread) == 0 && nread > 0) {
-        struct { void* buf; int len; } wiov = { buf, nread };
-        int nwritten = 0;
-        if (fd_write(dst_fd, &wiov, 1, &nwritten) != 0 || nwritten != nread) {
-            fd_close(src_fd); fd_close(dst_fd); return -1;
+    ssize_t nread;
+    while ((nread = read(src_fd, buf, BUF_SIZE)) > 0) {
+        ssize_t nwritten = 0, written_total = 0;
+        while (written_total < nread) {
+            nwritten = write(dst_fd, buf + written_total, nread - written_total);
+            if (nwritten < 0) { close(src_fd); close(dst_fd); return -1; }
+            written_total += nwritten;
         }
     }
-    fd_close(src_fd);
-    fd_close(dst_fd);
+    close(src_fd);
+    close(dst_fd);
     return 0;
 } 
