@@ -120,8 +120,7 @@ where
                 }
 
                 if ready_queue.is_empty() && has_more_input {
-                    // We have more input but no processes - sleep briefly
-                    thread::sleep(Duration::from_millis(10));
+                    // No sleep - continue immediately to process next batch
                     continue;
                 }
             } else {
