@@ -271,7 +271,7 @@ pub fn process_consensus_pipe<R: Read + Write>(
                                     nat_table.set_waiting_accept(process_id, src_port);
                                 }
                                 _ => { // Failure
-                                    error!("Network operation failed for process {}:{}", process_id, src_port);
+                                    error!("Network operation failed for process {}:{}, status {}", process_id, src_port, status);
                                     // Clear both waiting states to ensure process unblocks
                                     let mut nat_table = process.data.nat_table.lock().unwrap();
                                     nat_table.clear_waiting_accept(process_id, src_port);

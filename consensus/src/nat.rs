@@ -136,7 +136,7 @@ impl NatTable {
                         // No connection available, set waiting state
                         self.waiting_accepts.insert((pid, src_port), true);
                         debug!("No connection available for {}:{}, process will wait", pid, src_port);
-                        Ok(false)
+                        Ok(true) // Return true to indicate this is a valid waiting state
                     }
                     Err(e) => {
                         error!("Error accepting connection: {}", e);
@@ -255,7 +255,7 @@ impl NatTable {
                                 // No data available yet, mark as waiting
                                 self.waiting_recvs.insert((pid, src_port), true);
                                 debug!("No data available for {}:{}, process will wait", pid, src_port);
-                                Ok(false)
+                                Ok(true) // Return true to indicate this is a valid waiting state
                             }
                             Err(e) => {
                                 error!("Error reading from connection {}:{}: {}", pid, src_port, e);

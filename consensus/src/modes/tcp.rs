@@ -231,25 +231,43 @@ impl TcpMode {
 
                                     // Process the network operation
                                     let mut nat_table = nat_table.lock().unwrap();
-                                    let success = match nat_table.handle_network_operation(pid, op.clone()) {
-                                        Ok(success) => success,
+                                    let status: u8 = match nat_table.handle_network_operation(pid, op.clone()) {
+                                        Ok(success) => {
+                                            if !success {
+                                                0  // Return status 0 for failure
+                                            } else {
+                                                // Check if operation is waiting
+                                                let is_waiting = match &op {
+                                                    NetworkOperation::Accept { src_port, .. } => nat_table.is_waiting_for_accept(pid, *src_port),
+                                                    NetworkOperation::Recv { src_port } => nat_table.is_waiting_for_recv(pid, *src_port),
+                                                    _ => false
+                                                };
+                                                
+                                                if is_waiting {
+                                                    debug!("Operation is waiting for process {}:{}", pid, src_port);
+                                                    2 // Return status 2 for waiting
+                                                } else {
+                                                    1 // Return status 1 for success
+                                                }
+                                            }
+                                        },
                                         Err(e) => {
                                             error!("Failed to handle network operation: {}", e);
-                                            false
+                                            0
                                         }
                                     };
 
                                     // Add success/failure message to batch
                                     let mut buf = shared_buffer.lock().unwrap();
                                     if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![
-                                        if success { 1 } else { 0 },  // Success status
+                                        status,  // Use the computed status code
                                         src_port as u8, (src_port >> 8) as u8,  // Source port
                                         if is_accept { new_port as u8 } else { 0 },  // New port for accept
                                         if is_accept { (new_port >> 8) as u8 } else { 0 }  // New port high byte
                                     ])) {
                                         buf.extend(record);
-                                        info!("Added network operation result for process {}:{} (success: {})", 
-                                            pid, src_port, success);
+                                        info!("Added network operation result for process {}:{} (status: {})", 
+                                            pid, src_port, status);
                                     }
                                 } else {
                                     error!("Failed to deserialize network operation from runtime {}", runtime_id);
