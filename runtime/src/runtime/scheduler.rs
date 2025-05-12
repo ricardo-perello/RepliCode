@@ -13,6 +13,7 @@ use std::thread;
 use std::time::Duration;
 use crate::wasi_syscalls::net::OutgoingNetworkMessage;
 use crate::runtime::fd_table::FDEntry;
+use std::io::BufReader;
 
 struct BatchCollector {
     outgoing_messages: Vec<OutgoingNetworkMessage>,
@@ -236,9 +237,10 @@ pub fn run_scheduler_with_file(processes: Vec<Process>, consensus_file: &str) ->
 
 // // /// Wrapper for interactive mode using a live consensus pipe/socket.
 pub fn run_scheduler_interactive<R: Read + Write>(processes: Vec<Process>, consensus_pipe: &mut R) -> Result<()> {
+    let mut reader = BufReader::new(consensus_pipe);
     run_scheduler_dynamic(processes, |processes, outgoing_messages| {
         // Process pipe should keep running indefinitely
-        process_consensus_pipe(consensus_pipe, processes, outgoing_messages)?;
+        process_consensus_pipe(&mut reader, processes, outgoing_messages)?;
         Ok(true) // Always return true for pipe mode to keep scheduler running
     })
 }

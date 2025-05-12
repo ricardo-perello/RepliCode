@@ -37,12 +37,11 @@ fn get_next_pid() -> u64 {
 /// - **4**: FTP update. (Logic to dispatch the FTP command can be added.)
 /// - **5**: NetworkIn. The payload is expected to be a network message.
 pub fn process_consensus_pipe<R: Read + Write>(
-    consensus_pipe: &mut R, 
+    reader: &mut BufReader<R>, 
     processes: &mut Vec<process::Process>,
     outgoing_messages: Vec<OutgoingNetworkMessage>,
 ) -> Result<bool> {
     debug!("Processing consensus pipe with {} outgoing messages", outgoing_messages.len());
-    let mut reader = BufReader::new(consensus_pipe);
 
     // First, send any outgoing network messages as a batch
     if !outgoing_messages.is_empty() {
