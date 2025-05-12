@@ -10,6 +10,8 @@ use crate::wasi_syscalls::net::OutgoingNetworkMessage;
 use crate::runtime::fd_table::FDEntry;
 use bincode;
 use consensus::commands::NetworkOperation;
+use consensus::record::{write_record};
+use std::time::Duration;
 
 // Use an AtomicU64 for generating unique process IDs.
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);
@@ -96,15 +98,16 @@ pub fn process_consensus_pipe<R: Read + Write>(
 
     // Process the batch data as a series of records
     let mut data_reader = std::io::Cursor::new(batch_data);
+    let mut processed_records = 0;
     loop {
         // Read the message type (1 byte)
         let mut msg_type_buf = [0u8; 1];
         if data_reader.read_exact(&mut msg_type_buf).is_err() {
-            debug!("No more records in batch {}", batch_number);
+            debug!("No more records in batch {} (processed {} records)", batch_number, processed_records);
             break; // No more data.
         }
         let msg_type = msg_type_buf[0];
-        debug!("Processing record type {} in batch {}", msg_type, batch_number);
+        debug!("Processing record type {} in batch {} (record {})", msg_type, batch_number, processed_records + 1);
 
         // Read process_id (8 bytes)
         let process_id = match data_reader.read_u64::<LittleEndian>() {
@@ -118,7 +121,8 @@ pub fn process_consensus_pipe<R: Read + Write>(
             Err(_) => break,
         };
 
-        debug!("Reading payload of {} bytes for process {} in batch {}", payload_len, process_id, batch_number);
+        debug!("Reading payload of {} bytes for process {} in batch {} (record {})", 
+            payload_len, process_id, batch_number, processed_records + 1);
 
         // Read the payload.
         let mut payload = vec![0u8; payload_len];
@@ -142,7 +146,6 @@ pub fn process_consensus_pipe<R: Read + Write>(
                 } else {
                     error!("Invalid clock message format in batch {}: {}", batch_number, msg_str);
                 }
-                break; // End of batch.
             },
             1 => { // FD update.
                 let msg_str = String::from_utf8_lossy(&payload);
@@ -348,6 +351,7 @@ pub fn process_consensus_pipe<R: Read + Write>(
                 error!("Unknown message type: {} in message", msg_type);
             }
         }
+        processed_records += 1;
     }
     Ok(true) // For pipe mode, we always return true to keep scheduler running
 }

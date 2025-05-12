@@ -11,6 +11,7 @@ mod clients;
 mod http_server;
 mod batch;
 mod runtime_manager;
+mod batch_history;
 use std::env;
 use std::io;
 use log::{info, error};

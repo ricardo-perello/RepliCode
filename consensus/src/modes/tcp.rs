@@ -3,8 +3,10 @@ use std::net::{TcpStream, TcpListener};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use std::path::PathBuf;
 use log::{error, info, debug, warn};
 use bincode;
+use chrono::Local;
 
 use crate::record::write_record;
 use crate::commands::{parse_command, Command, NetworkOperation};
@@ -12,24 +14,34 @@ use crate::nat::NatTable;
 use crate::http_server::HttpServer;
 use crate::runtime_manager::RuntimeManager;
 use crate::batch::{Batch, BatchDirection};
+use crate::batch_history::BatchHistory;
 
 pub struct TcpMode {
     runtime_manager: RuntimeManager,
     nat_table: Arc<Mutex<NatTable>>,
     shared_buffer: Arc<Mutex<Vec<u8>>>,
+    batch_history: Arc<Mutex<BatchHistory>>,
 }
 
 impl TcpMode {
     pub fn new() -> io::Result<Self> {
         info!("Initializing TcpMode");
-        let runtime_manager = RuntimeManager::new("127.0.0.1:9000")?;
+        
+        // Initialize batch history first
+        let date = Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let history_path = PathBuf::from(format!("session-{}.bin", date));
+        let batch_history: Arc<Mutex<BatchHistory>> = Arc::new(Mutex::new(BatchHistory::new(&history_path)?));
+        
+        let runtime_manager = RuntimeManager::new("127.0.0.1:9000", Arc::clone(&batch_history))?;
         let nat_table = Arc::new(Mutex::new(NatTable::new()));
         let shared_buffer = Arc::new(Mutex::new(Vec::new()));
+        
         info!("TcpMode initialized successfully");
         Ok(Self {
             runtime_manager,
             nat_table,
             shared_buffer,
+            batch_history,
         })
     }
 
@@ -68,6 +80,7 @@ impl TcpMode {
         debug!("Initializing batch sender thread");
         let buffer = Arc::clone(&self.shared_buffer);
         let runtime_manager = self.runtime_manager.clone();
+        let batch_history: Arc<Mutex<BatchHistory>> = Arc::clone(&self.batch_history);
         thread::spawn(move || {
             let mut batch_number = 0u64;
             info!("Batch sender thread started");
@@ -90,6 +103,12 @@ impl TcpMode {
                     direction: BatchDirection::Incoming,
                     data: buf.clone(),
                 };
+                
+                // Save batch to history
+                if let Err(e) = batch_history.lock().unwrap().save_batch(&batch) {
+                    error!("Failed to save batch {} to history: {}", batch_number, e);
+                }
+                
                 info!("Broadcasting batch {} to all runtimes", batch.number);
                 runtime_manager.broadcast_batch(&batch);
                 buf.clear();

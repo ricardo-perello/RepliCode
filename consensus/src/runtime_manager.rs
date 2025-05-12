@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use log::{error, info, debug, warn};
 use serde::{Serialize, Deserialize};
 pub use crate::batch::{Batch, BatchDirection};
+use crate::batch_history::BatchHistory;
 
 /// Represents a connected runtime.
 #[derive(Clone)]
@@ -20,10 +21,11 @@ pub struct RuntimeManager {
     pub listener: Arc<TcpListener>,
     pub runtimes: Arc<Mutex<HashMap<u64, RuntimeConnection>>>,
     next_runtime_id: Arc<Mutex<u64>>,
+    batch_history: Arc<Mutex<BatchHistory>>,
 }
 
 impl RuntimeManager {
-    pub fn new(addr: &str) -> io::Result<Self> {
+    pub fn new(addr: &str, batch_history: Arc<Mutex<BatchHistory>>) -> io::Result<Self> {
         info!("Initializing RuntimeManager on {}", addr);
         let listener = Arc::new(TcpListener::bind(addr)?);
         let runtimes = Arc::new(Mutex::new(HashMap::new()));
@@ -33,6 +35,7 @@ impl RuntimeManager {
             listener,
             runtimes,
             next_runtime_id,
+            batch_history,
         })
     }
 
@@ -42,19 +45,61 @@ impl RuntimeManager {
         let runtimes = Arc::clone(&self.runtimes);
         let next_runtime_id = Arc::clone(&self.next_runtime_id);
         let listener = self.listener.try_clone().expect("Failed to clone listener");
+        let batch_history = Arc::clone(&self.batch_history);
         thread::spawn(move || {
             info!("Runtime acceptor thread started");
             for stream in listener.incoming() {
                 match stream {
-                    Ok(stream) => {
+                    Ok(mut stream) => {
                         let mut id_lock = next_runtime_id.lock().unwrap();
                         let runtime_id = *id_lock;
                         *id_lock += 1;
                         drop(id_lock);
                         info!("Accepted runtime {} from {}", runtime_id, stream.peer_addr().unwrap());
+                        
+                        // Send historical batches to new runtime
+                        if let Ok(batches) = batch_history.lock().unwrap().get_batches_since(0) {
+                            // Filter to only include incoming batches
+                            let incoming_batches: Vec<_> = batches.into_iter()
+                                .filter(|batch| matches!(batch.direction, BatchDirection::Incoming))
+                                .collect();
+                            
+                            info!("Sending {} historical incoming batches to new runtime {}", 
+                                incoming_batches.len(), runtime_id);
+                            
+                            for batch in incoming_batches {
+                                // Create a new buffer for each batch to ensure clean state
+                                let mut serialized = Vec::new();
+                                // Write batch number (8 bytes)
+                                serialized.extend_from_slice(&batch.number.to_le_bytes());
+                                // Write direction (1 byte)
+                                serialized.push(0); // Always Incoming (0) since we filtered
+                                // Write data length (8 bytes)
+                                serialized.extend_from_slice(&(batch.data.len() as u64).to_le_bytes());
+                                // Write the actual data
+                                serialized.extend_from_slice(&batch.data);
+                                
+                                // Write the entire batch at once
+                                match stream.write_all(&serialized) {
+                                    Ok(_) => {
+                                        if let Err(e) = stream.flush() {
+                                            error!("Failed to flush historical batch {} to runtime {}: {}", batch.number, runtime_id, e);
+                                            break;
+                                        }
+                                        debug!("Successfully sent historical batch {} to runtime {} ({} bytes)", 
+                                            batch.number, runtime_id, serialized.len());
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to send historical batch {} to runtime {}: {}", batch.number, runtime_id, e);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
                         let conn = RuntimeConnection {
                             stream: Arc::new(Mutex::new(stream)),
-                            last_processed_batch: 0,
+                            last_processed_batch: batch_history.lock().unwrap().get_current_batch(),
                         };
                         runtimes.lock().unwrap().insert(runtime_id, conn);
                         info!("Runtime {} added to connection pool", runtime_id);
