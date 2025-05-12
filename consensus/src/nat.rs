@@ -393,6 +393,38 @@ impl NatTable {
             .cloned()
             .collect();
 
+        // First collect all waiting recv operations
+        let waiting_recvs: Vec<(u64, u16)> = self.connections.keys()
+            .filter(|(pid, src_port)| self.is_waiting_for_recv(*pid, *src_port))
+            .cloned()
+            .collect();
+
+        // Then check which of these have closed connections
+        for (pid, src_port) in waiting_recvs {
+            if let Some(&consensus_port) = self.connections.get(&(pid, src_port)) {
+                if let Some(entry) = self.port_mappings.get_mut(&consensus_port) {
+                    let mut buf = [0u8; 1];
+                    if let Ok(0) = entry.connection.read(&mut buf) {
+                        // Connection is closed, send status 0
+                        debug!("Adding status 0 for closed connection with waiting recv operation {}:{}", pid, src_port);
+                        messages.push((pid, src_port, vec![0], false));
+                        // Clear the waiting state since we're notifying about the closed connection
+                        self.waiting_recvs.remove(&(pid, src_port));
+                    }
+                } else {
+                    // No entry found, treat as closed
+                    debug!("Adding status 0 for missing connection with waiting recv operation {}:{}", pid, src_port);
+                    messages.push((pid, src_port, vec![0], false));
+                    self.waiting_recvs.remove(&(pid, src_port));
+                }
+            } else {
+                // No connection found, treat as closed
+                debug!("Adding status 0 for missing connection with waiting recv operation {}:{}", pid, src_port);
+                messages.push((pid, src_port, vec![0], false));
+                self.waiting_recvs.remove(&(pid, src_port));
+            }
+        }
+
         //debug!("Checking {} waiting listeners for new connections", waiting_listeners.len());
 
         for (pid, src_port) in waiting_listeners {
