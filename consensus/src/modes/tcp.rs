@@ -231,7 +231,8 @@ impl TcpMode {
 
                                     // Process the network operation
                                     let mut nat_table = nat_table.lock().unwrap();
-                                    let status: u8 = match nat_table.handle_network_operation(pid, op.clone()) {
+                                    let mut messages = Vec::new();
+                                    let status: u8 = match nat_table.handle_network_operation(pid, op.clone(), &mut messages) {
                                         Ok(success) => {
                                             if !success {
                                                 0  // Return status 0 for failure
@@ -257,8 +258,34 @@ impl TcpMode {
                                         }
                                     };
 
-                                    // Add success/failure message to batch
+                                    // Process any messages returned from the operation
                                     let mut buf = shared_buffer.lock().unwrap();
+                                    for (msg_pid, msg_port, msg_data, is_connection) in messages {
+                                        if is_connection {
+                                            if let Ok(record) = write_record(&Command::NetworkIn(msg_pid, 0, vec![
+                                                1,  // Success status
+                                                msg_port as u8, (msg_port >> 8) as u8,  // Listening port
+                                                (msg_port + 1) as u8, ((msg_port + 1) >> 8) as u8  // New port
+                                            ])) {
+                                                buf.extend(record);
+                                                info!("Added connection notification for process {}:{}", msg_pid, msg_port);
+                                            }
+                                        } else if !msg_data.is_empty() {
+                                            debug!("Adding {} bytes of data for process {}:{}", msg_data.len(), msg_pid, msg_port);
+                                            if let Ok(record) = write_record(&Command::NetworkIn(msg_pid, msg_port, msg_data)) {
+                                                buf.extend(record);
+                                            }
+                                            if let Ok(record) = write_record(&Command::NetworkIn(msg_pid, 0, vec![
+                                                1,  // Success status
+                                                msg_port as u8, (msg_port >> 8) as u8,  // Source port
+                                                0, 0  // No new port for recv
+                                            ])) {
+                                                buf.extend(record);
+                                            }
+                                        }
+                                    }
+
+                                    // Add success/failure message to batch
                                     if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![
                                         status,  // Use the computed status code
                                         src_port as u8, (src_port >> 8) as u8,  // Source port

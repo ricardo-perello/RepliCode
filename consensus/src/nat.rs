@@ -52,7 +52,12 @@ impl NatTable {
         port
     }
 
-    pub fn handle_network_operation(&mut self, pid: u64, op: NetworkOperation) -> Result<bool, Box<dyn std::error::Error>> {
+    pub fn handle_network_operation(
+        &mut self,
+        pid: u64,
+        op: NetworkOperation,
+        messages: &mut Vec<(u64, u16, Vec<u8>, bool)>,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         debug!("Handling network operation for process {}: {:?}", pid, op);
         match op {
             NetworkOperation::Listen { src_port } => {
@@ -239,9 +244,11 @@ impl NatTable {
                     if let Some(entry) = self.port_mappings.get_mut(&consensus_port) {
                         if !entry.buffer.is_empty() {
                             // Data is available in the buffer
-                            entry.buffer.clear(); // Optionally, you could return the data here
+                            let data = entry.buffer.clone();
+                            entry.buffer.clear();
                             self.waiting_recvs.remove(&(pid, src_port));
-                            info!("Buffered data available for process {}:{}", pid, src_port);
+                            info!("Returning {} bytes of buffered data for process {}:{}", data.len(), pid, src_port);
+                            messages.push((pid, src_port, data, false));
                             Ok(true)
                         } else {
                             // No data available, mark as waiting
