@@ -234,33 +234,20 @@ impl NatTable {
                 }
             }
             NetworkOperation::Recv { src_port } => {
-                // Check if this is a connection
+                // Only check the buffer, do not read from the socket here
                 if let Some(&consensus_port) = self.connections.get(&(pid, src_port)) {
                     if let Some(entry) = self.port_mappings.get_mut(&consensus_port) {
-                        let mut buf = [0u8; 1024];
-                        match entry.connection.read(&mut buf) {
-                            Ok(0) => {
-                                info!("Connection closed by remote for {}:{}", pid, src_port);
-                                self.waiting_recvs.remove(&(pid, src_port));
-                                Ok(false)
-                            }
-                            Ok(n) => {
-                                // Store the data in the connection's buffer
-                                entry.buffer.extend_from_slice(&buf[..n]);
-                                self.waiting_recvs.remove(&(pid, src_port));
-                                info!("Received {} bytes for process {}:{}", n, pid, src_port);
-                                Ok(true)
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                // No data available yet, mark as waiting
-                                self.waiting_recvs.insert((pid, src_port), true);
-                                debug!("No data available for {}:{}, process will wait", pid, src_port);
-                                Ok(true) // Return true to indicate this is a valid waiting state
-                            }
-                            Err(e) => {
-                                error!("Error reading from connection {}:{}: {}", pid, src_port, e);
-                                Ok(false)
-                            }
+                        if !entry.buffer.is_empty() {
+                            // Data is available in the buffer
+                            entry.buffer.clear(); // Optionally, you could return the data here
+                            self.waiting_recvs.remove(&(pid, src_port));
+                            info!("Buffered data available for process {}:{}", pid, src_port);
+                            Ok(true)
+                        } else {
+                            // No data available, mark as waiting
+                            self.waiting_recvs.insert((pid, src_port), true);
+                            debug!("No buffered data for {}:{}, process will wait", pid, src_port);
+                            Ok(true)
                         }
                     } else {
                         error!("No connection entry found for consensus port {}", consensus_port);
@@ -402,21 +389,13 @@ impl NatTable {
         // Then check which of these have closed connections
         for (pid, src_port) in waiting_recvs {
             if let Some(&consensus_port) = self.connections.get(&(pid, src_port)) {
-                if let Some(entry) = self.port_mappings.get_mut(&consensus_port) {
-                    let mut buf = [0u8; 1];
-                    if let Ok(0) = entry.connection.read(&mut buf) {
-                        // Connection is closed, send status 0
-                        debug!("Adding status 0 for closed connection with waiting recv operation {}:{}", pid, src_port);
-                        messages.push((pid, src_port, vec![0], false));
-                        // Clear the waiting state since we're notifying about the closed connection
-                        self.waiting_recvs.remove(&(pid, src_port));
-                    }
-                } else {
+                if self.port_mappings.get_mut(&consensus_port).is_none() {
                     // No entry found, treat as closed
                     debug!("Adding status 0 for missing connection with waiting recv operation {}:{}", pid, src_port);
                     messages.push((pid, src_port, vec![0], false));
                     self.waiting_recvs.remove(&(pid, src_port));
                 }
+                // Otherwise, do nothing: let the main read loop handle data and closure
             } else {
                 // No connection found, treat as closed
                 debug!("Adding status 0 for missing connection with waiting recv operation {}:{}", pid, src_port);
@@ -499,31 +478,20 @@ impl NatTable {
                     to_remove.push(*consensus_port);
                 }
                 Ok(n) => {
-                    // Check if this is a connection or listener
-                    let is_connection = self.connections.contains_key(&(entry.process_id, entry.process_port));
-                    let is_listener = self.listeners.contains_key(&(entry.process_id, entry.process_port));
-                    
-                    if is_connection {
-                        info!("Received {} bytes from connection for process {}:{}: {:?}", 
-                             n, entry.process_id, entry.process_port, String::from_utf8_lossy(&buf[..n]));
+                    // Always append received data to the buffer
+                    entry.buffer.extend_from_slice(&buf[..n]);
+                    // Only push to messages if this process is waiting for recv
+                    let is_waiting = self.waiting_recvs.contains_key(&(entry.process_id, entry.process_port));
+                    if is_waiting && !entry.buffer.is_empty() {
+                        info!("Delivering {} bytes from buffer to waiting process {}:{}", entry.buffer.len(), entry.process_id, entry.process_port);
                         messages.push((
                             entry.process_id,
                             entry.process_port,
-                            buf[..n].to_vec(),
+                            entry.buffer.clone(),
                             false
                         ));
-                    } else if is_listener {
-                        info!("Received {} bytes from listener for process {}:{}: {:?}", 
-                             n, entry.process_id, entry.process_port, String::from_utf8_lossy(&buf[..n]));
-                        messages.push((
-                            entry.process_id,
-                            entry.process_port,
-                            buf[..n].to_vec(),
-                            false
-                        ));
-                    } else {
-                        error!("Received data on unknown socket type for {}:{}", 
-                            entry.process_id, entry.process_port);
+                        entry.buffer.clear();
+                        self.waiting_recvs.remove(&(entry.process_id, entry.process_port));
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
