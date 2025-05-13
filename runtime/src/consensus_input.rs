@@ -9,9 +9,6 @@ use crate::runtime::process;
 use crate::wasi_syscalls::net::OutgoingNetworkMessage;
 use crate::runtime::fd_table::FDEntry;
 use bincode;
-use consensus::commands::NetworkOperation;
-use consensus::record::{write_record};
-use std::time::Duration;
 
 // Use an AtomicU64 for generating unique process IDs.
 static NEXT_PID: AtomicU64 = AtomicU64::new(1);

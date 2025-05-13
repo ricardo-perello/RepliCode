@@ -2,7 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use log::{info, error, debug};
+use log::{error, debug};
 use crate::batch::{Batch, BatchDirection};
 
 pub struct BatchHistory {

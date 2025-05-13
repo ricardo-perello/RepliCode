@@ -74,7 +74,7 @@ pub struct Process {
 /// Creates a new process from a WASM binary (passed as a byte vector) and assigns it a unique ID.
 pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process> {
     debug!("Starting process {} from WASM bytes", id);
-    let mut config = wasmtime::Config::new();
+    let config = wasmtime::Config::new();
     debug!("WASM config created");
     let engine = Engine::new(&config)?;
     debug!("WASM engine created");

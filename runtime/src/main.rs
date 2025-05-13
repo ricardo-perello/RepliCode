@@ -5,7 +5,6 @@ mod consensus_input;
 mod runtime;
 mod wasi_syscalls;
 use std::net::TcpStream;
-use std::io::{BufReader, Write};
 
 fn main() -> Result<()> {
     // Initialize the logger (env_logger reads RUST_LOG env variable)

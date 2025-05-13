@@ -1,10 +1,9 @@
-use std::io::{self, Write, Read, BufReader};
+use std::io::{self, Write};
 use std::net::{TcpStream, TcpListener};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::collections::HashMap;
 use log::{error, info, debug, warn};
-use serde::{Serialize, Deserialize};
 pub use crate::batch::{Batch, BatchDirection};
 use crate::batch_history::BatchHistory;
 
@@ -117,7 +116,7 @@ impl RuntimeManager {
     /// Broadcasts a batch to all connected runtimes that haven't processed it yet.
     pub fn broadcast_batch(&self, batch: &Batch) {
         debug!("Broadcasting batch {} to all runtimes ({} bytes)", batch.number, batch.data.len());
-        let mut conns = self.runtimes.lock().unwrap();
+        let conns = self.runtimes.lock().unwrap();
         let mut sent_count = 0;
         let mut error_count = 0;
         

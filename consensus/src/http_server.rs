@@ -2,7 +2,7 @@ use std::net::{TcpListener, TcpStream};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use log::{info, error, debug};
+use log::{info, error};
 use serde_json::json;
 use crate::nat::NatTable;
 

@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 use std::fs::OpenOptions;
-use log::{info, error};
+use log::info;
 
 use crate::record::write_record;
 use crate::commands::{parse_command, Command};
