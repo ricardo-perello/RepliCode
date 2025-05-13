@@ -242,7 +242,7 @@ impl TcpMode {
                                 // Handle network operation
                                 if let Ok(op) = bincode::deserialize::<NetworkOperation>(&payload) {
                                     info!("Processing network operation from runtime {}: {:?}", runtime_id, op);
-                                    let (src_port, new_port, is_accept, is_recv) = match &op {
+                                    let (src_port, new_port, is_accept, _is_recv) = match &op {
                                         NetworkOperation::Connect { src_port, .. } => (*src_port, 0, false, false),
                                         NetworkOperation::Send { src_port, .. } => (*src_port, 0, false, false),
                                         NetworkOperation::Listen { src_port } => (*src_port, 0, false, false),
@@ -328,7 +328,6 @@ impl TcpMode {
                 // Sleep briefly to avoid tight loop
                 thread::sleep(Duration::from_millis(10));
             }
-            warn!("Runtime reader thread ended unexpectedly");
         });
         info!("Runtime reader thread initialized successfully");
         Ok(())

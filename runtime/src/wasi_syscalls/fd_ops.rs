@@ -7,7 +7,7 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 
 pub fn wasi_fd_advise(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
     offset: u64,
     len: u64,
@@ -18,7 +18,7 @@ pub fn wasi_fd_advise(
 }
 
 pub fn wasi_fd_allocate(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
     offset: u64,
     len: u64,
@@ -28,7 +28,7 @@ pub fn wasi_fd_allocate(
 }
 
 pub fn wasi_fd_datasync(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
 ) -> Result<u32> {
     info!("wasi_fd_datasync: fd={}", fd);
@@ -36,7 +36,7 @@ pub fn wasi_fd_datasync(
 }
 
 pub fn wasi_fd_fdstat_set_flags(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
     flags: u32,
 ) -> Result<u32> {
@@ -45,7 +45,7 @@ pub fn wasi_fd_fdstat_set_flags(
 }
 
 pub fn wasi_fd_fdstat_set_rights(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
     fs_rights_base: u64,
     fs_rights_inheriting: u64,
@@ -97,7 +97,7 @@ pub fn wasi_fd_filestat_get(
 }
 
 pub fn wasi_fd_filestat_set_size(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
     size: u64,
 ) -> Result<u32> {
@@ -106,7 +106,7 @@ pub fn wasi_fd_filestat_set_size(
 }
 
 pub fn wasi_fd_filestat_set_times(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
     atim: u64,
     mtim: u64,
@@ -118,7 +118,7 @@ pub fn wasi_fd_filestat_set_times(
 }
 
 pub fn wasi_fd_pread(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
     iovs_ptr: u32,
     iovs_len: u32,
@@ -131,7 +131,7 @@ pub fn wasi_fd_pread(
 }
 
 pub fn wasi_fd_pwrite(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
     iovs_ptr: u32,
     iovs_len: u32,
@@ -144,7 +144,7 @@ pub fn wasi_fd_pwrite(
 }
 
 pub fn wasi_fd_renumber(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     from: u32,
     to: u32,
 ) -> Result<u32> {
@@ -153,7 +153,7 @@ pub fn wasi_fd_renumber(
 }
 
 pub fn wasi_fd_sync(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
 ) -> Result<u32> {
     info!("wasi_fd_sync: fd={}", fd);
@@ -161,7 +161,7 @@ pub fn wasi_fd_sync(
 }
 
 pub fn wasi_fd_tell(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
     offset_ptr: u32,
 ) -> Result<u32> {

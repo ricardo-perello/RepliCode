@@ -64,7 +64,7 @@ pub fn wasi_path_filestat_get(
 }
 
 pub fn wasi_path_filestat_set_times(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
     flags: u32,
     path_ptr: u32,
@@ -79,7 +79,7 @@ pub fn wasi_path_filestat_set_times(
 }
 
 pub fn wasi_path_link(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     old_fd: u32,
     old_flags: u32,
     old_path_ptr: u32,
@@ -94,7 +94,7 @@ pub fn wasi_path_link(
 }
 
 pub fn wasi_path_readlink(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     fd: u32,
     path_ptr: u32,
     path_len: u32,
@@ -108,7 +108,7 @@ pub fn wasi_path_readlink(
 }
 
 pub fn wasi_path_rename(
-    caller: Caller<ProcessData>,
+    _caller: Caller<ProcessData>,
     old_fd: u32,
     old_path_ptr: u32,
     old_path_len: u32,

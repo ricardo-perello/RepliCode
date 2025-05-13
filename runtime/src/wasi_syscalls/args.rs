@@ -50,18 +50,18 @@ pub fn wasi_args_sizes_get(
 }
 
 pub fn wasi_environ_get(
-    caller: Caller<ProcessData>,
-    environ_ptr: u32,
-    environ_buf_ptr: u32,
+    _caller: Caller<ProcessData>,
+    _environ_ptr: u32,
+    _environ_buf_ptr: u32,
 ) -> Result<u32> {
     // TODO: Implement actual environ handling
     Ok(0)
 }
 
 pub fn wasi_environ_sizes_get(
-    caller: Caller<ProcessData>,
-    environ_count_ptr: u32,
-    environ_buf_size_ptr: u32,
+    _caller: Caller<ProcessData>,
+    _environ_count_ptr: u32,
+    _environ_buf_size_ptr: u32,
 ) -> Result<u32> {
     // TODO: Implement actual environ size calculation
     Ok(0)
