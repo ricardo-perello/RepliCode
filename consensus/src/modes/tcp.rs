@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::path::PathBuf;
+use std::collections::HashSet;
 use log::{error, info, debug, warn};
 use bincode;
 use chrono::Local;
@@ -21,6 +22,7 @@ pub struct TcpMode {
     nat_table: Arc<Mutex<NatTable>>,
     shared_buffer: Arc<Mutex<Vec<u8>>>,
     batch_history: Arc<Mutex<BatchHistory>>,
+    executed_outgoing: Arc<Mutex<HashSet<u64>>>,
 }
 
 impl TcpMode {
@@ -35,6 +37,7 @@ impl TcpMode {
         let runtime_manager = RuntimeManager::new("127.0.0.1:9000", Arc::clone(&batch_history))?;
         let nat_table = Arc::new(Mutex::new(NatTable::new()));
         let shared_buffer = Arc::new(Mutex::new(Vec::new()));
+        let executed_outgoing = Arc::new(Mutex::new(HashSet::new()));
         
         info!("TcpMode initialized successfully");
         Ok(Self {
@@ -42,6 +45,7 @@ impl TcpMode {
             nat_table,
             shared_buffer,
             batch_history,
+            executed_outgoing,
         })
     }
 
@@ -124,8 +128,11 @@ impl TcpMode {
         let runtime_manager = self.runtime_manager.clone();
         let nat_table = Arc::clone(&self.nat_table);
         let shared_buffer = Arc::clone(&self.shared_buffer);
+        let executed_outgoing = Arc::clone(&self.executed_outgoing);
+        
         thread::spawn(move || {
             info!("Runtime reader thread started");
+            let mut last_processed_batch = 0u64;
             loop {
                 // Get list of runtime IDs
                 let runtime_ids: Vec<u64> = {
@@ -160,6 +167,22 @@ impl TcpMode {
                         let batch_number = u64::from_le_bytes(batch_header[0..8].try_into().unwrap());
                         let direction = batch_header[8];
                         debug!("Received batch {} with direction {} from runtime {}", batch_number, direction, runtime_id);
+                        
+                        // Skip processing if batch number is less than or equal to last processed batch
+                        if batch_number <= last_processed_batch {
+                            debug!("Skipping batch {} (already processed up to {})", batch_number, last_processed_batch);
+                            continue;
+                        }
+                        last_processed_batch = batch_number;
+
+                        // For outgoing batches, check if we've already executed this batch number
+                        if direction == 1 {  // Outgoing batch
+                            let mut done = executed_outgoing.lock().unwrap();
+                            if !done.insert(batch_number) {
+                                debug!("Duplicate outgoing batch {} – skipping", batch_number);
+                                continue;
+                            }
+                        }
 
                         // Read batch data length (8 bytes)
                         let mut data_len_buf = [0u8; 8];

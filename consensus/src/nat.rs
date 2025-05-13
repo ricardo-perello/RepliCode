@@ -489,7 +489,7 @@ impl NatTable {
                     entry.buffer.extend_from_slice(&buf[..n]);
                     // Only push to messages if this process is waiting for recv
                     let is_waiting = self.waiting_recvs.contains_key(&(entry.process_id, entry.process_port));
-                    if is_waiting && !entry.buffer.is_empty() {
+                    if is_waiting {
                         info!("Delivering {} bytes from buffer to waiting process {}:{}", entry.buffer.len(), entry.process_id, entry.process_port);
                         messages.push((
                             entry.process_id,
