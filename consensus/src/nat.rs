@@ -515,8 +515,12 @@ impl NatTable {
         // Clean up closed connections
         for port in to_remove {
             if let Some(entry) = self.port_mappings.remove(&port) {
+                // Check if this was a connection and if it was waiting for recv BEFORE removing it
+                let was_connection = self.connections.contains_key(&(entry.process_id, entry.process_port));
+                let was_waiting_recv = self.is_waiting_for_recv(entry.process_id, entry.process_port);
+
                 // Remove from appropriate mapping
-                if self.connections.contains_key(&(entry.process_id, entry.process_port)) {
+                if was_connection {
                     self.connections.remove(&(entry.process_id, entry.process_port));
                     debug!("Removed connection mapping for {}:{}", entry.process_id, entry.process_port);
                 } else if self.listeners.contains_key(&(entry.process_id, entry.process_port)) {
@@ -525,6 +529,14 @@ impl NatTable {
                     debug!("Removed listener mapping for {}:{}", entry.process_id, entry.process_port);
                 }
                 info!("Removed NAT entry for {}:{}", entry.process_id, entry.process_port);
+
+                // If this was a connection and it was waiting for recv, send status 0
+                if was_connection && was_waiting_recv {
+                    debug!("Connection closed while waiting for recv, sending status 0 for {}:{}", 
+                        entry.process_id, entry.process_port);
+                    messages.push((entry.process_id, entry.process_port, vec![0], false));
+                    self.waiting_recvs.remove(&(entry.process_id, entry.process_port));
+                }
             }
         }
 
