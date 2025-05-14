@@ -270,6 +270,12 @@ impl NatTable {
                 
                 // First check if this is a connection
                 if let Some(&consensus_port) = self.connections.get(&(pid, src_port)) {
+                    if let Some(entry) = self.port_mappings.get_mut(&consensus_port) {
+                        // Shutdown the socket
+                        if let Err(e) = entry.connection.shutdown(std::net::Shutdown::Both) {
+                            error!("Failed to shutdown socket: {}", e);
+                        }
+                    }
                     self.port_mappings.remove(&consensus_port);
                     self.connections.remove(&(pid, src_port));
                     info!("Closed connection for {}:{}", pid, src_port);
@@ -277,6 +283,12 @@ impl NatTable {
                 }
                 // If not a connection, check if it's a listener
                 else if let Some(&consensus_port) = self.process_ports.get(&(pid, src_port)) {
+                    if let Some(entry) = self.port_mappings.get_mut(&consensus_port) {
+                        // Shutdown the socket
+                        if let Err(e) = entry.connection.shutdown(std::net::Shutdown::Both) {
+                            error!("Failed to shutdown socket: {}", e);
+                        }
+                    }
                     self.port_mappings.remove(&consensus_port);
                     self.process_ports.remove(&(pid, src_port));
                     self.listeners.remove(&(pid, src_port));

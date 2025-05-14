@@ -429,8 +429,11 @@ pub fn wasi_sock_recv(
         if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, buffer, .. })) = table.entries.get_mut(fd as usize) {
             src_port = *local_port;
             if !buffer.is_empty() {
-                data = buffer.drain(..).collect::<Vec<u8>>();
+                // Only take what we need from the buffer
+                let to_take = buffer.len().min(ri_data_len as usize);
+                data = buffer.drain(..to_take).collect::<Vec<u8>>();
                 has_data = true;
+                debug!("Taking {} bytes from buffer ({} remaining)", to_take, buffer.len());
             }
         } else {
             error!("Invalid socket FD {} for process {}", fd, pid);
@@ -462,8 +465,10 @@ pub fn wasi_sock_recv(
             let mut table = process_data.fd_table.lock().unwrap();
             if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { buffer, .. })) = table.entries.get_mut(fd as usize) {
                 if !buffer.is_empty() {
-                    data2 = buffer.drain(..).collect::<Vec<u8>>();
+                    let to_take = buffer.len().min(ri_data_len as usize);
+                    data2 = buffer.drain(..to_take).collect::<Vec<u8>>();
                     has_data2 = true;
+                    debug!("After blocking: Taking {} bytes from buffer ({} remaining)", to_take, buffer.len());
                 }
             }
         }
@@ -521,11 +526,45 @@ pub fn wasi_sock_recv(
 }
 
 pub fn wasi_sock_shutdown(
-    _caller: Caller<ProcessData>,
+    mut caller: Caller<'_, ProcessData>,
     fd: u32,
     how: u32,
 ) -> Result<u32> {
-    info!("wasi_sock_shutdown: fd={}, how={}", fd, how);
+    debug!("wasi_sock_shutdown: fd={}, how={}", fd, how);
+    let pid;
+    let src_port;
+    
+    // Get socket FD entry
+    {
+        let process_data = caller.data();
+        pid = process_data.id;
+        let table = process_data.fd_table.lock().unwrap();
+        if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, .. })) = table.entries.get(fd as usize) {
+            src_port = *local_port;
+        } else {
+            error!("Invalid socket FD {} for process {}", fd, pid);
+            return Ok(1); // EINVAL
+        }
+    }
+    
+    // Queue the close operation
+    {
+        let process_data = caller.data();
+        let op = NetworkOperation::Close {
+            src_port,
+        };
+        
+        process_data.network_queue.lock().unwrap().push(OutgoingNetworkMessage {
+            pid,
+            operation: op,
+        });
+        info!("Queued close operation for process {}:{}", pid, src_port);
+    }
+    
+    // Block until consensus processes this
+    debug!("Blocking process {} for network operation", pid);
+    block_process_for_network(&mut caller);
+    
     Ok(0)
 }
 

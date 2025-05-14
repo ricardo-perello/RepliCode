@@ -1,7 +1,6 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
+#include <netinet/in.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -33,118 +32,218 @@ int sock_shutdown(int sock_fd, int how);
 
 #define BUF_SIZE 4096
 #define MAX_FILENAME 256
+#define MAX_CMD_SIZE 1024
 
-void handle_client(int client_fd);
+// Helper function to trim whitespace and newlines from the end of a string
+void trim_end(char *str) {
+    int len = strlen(str);
+    while (len > 0 && (str[len-1] == ' ' || str[len-1] == '\n' || str[len-1] == '\r')) {
+        str[len-1] = '\0';
+        len--;
+    }
+}
+
+// Helper function to convert network byte order to host byte order
+uint32_t ntohl(uint32_t netlong) {
+    return ((netlong & 0xFF) << 24) |
+           ((netlong & 0xFF00) << 8) |
+           ((netlong & 0xFF0000) >> 8) |
+           ((netlong & 0xFF000000) >> 24);
+}
+
+void handle_client(int client_fd) {
+    char cmd_buf[MAX_CMD_SIZE];
+    int bytes_received;
+    int bytes_sent;
+    int ret;
+    
+    // Receive command and filename
+    int total_received = 0;
+    while (total_received < MAX_CMD_SIZE - 1) {
+        ret = sock_recv(client_fd, cmd_buf + total_received, 1, 0, &bytes_received, NULL);
+        if (ret != 0 || bytes_received == 0) {
+            printf("Failed to receive command or client disconnected\n");
+            fflush(stdout);
+            return;
+        }
+        total_received += bytes_received;
+        // Stop at newline or if we've received enough data
+        if (cmd_buf[total_received - 1] == '\n' || total_received >= MAX_CMD_SIZE - 1) {
+            break;
+        }
+    }
+    
+    // Null terminate the command
+    cmd_buf[total_received] = '\0';
+    printf("Received command: %s\n", cmd_buf);
+    fflush(stdout);
+
+    // Parse command
+    char* cmd = strtok(cmd_buf, " ");
+    if (cmd == NULL) {
+        printf("Invalid command format\n");
+        fflush(stdout);
+        return;
+    }
+    
+    if (strcmp(cmd, "SEND") == 0) {
+        // Handle SEND command
+        char* filename = strtok(NULL, " ");
+        if (filename == NULL) {
+            printf("Missing filename for SEND command\n");
+            fflush(stdout);
+            return;
+        }
+        // Trim any whitespace or newlines from the filename
+        trim_end(filename);
+        
+        // Receive file size
+        uint32_t file_size;
+        ret = sock_recv(client_fd, &file_size, sizeof(file_size), 0, &bytes_received, NULL);
+        if (ret != 0 || bytes_received != sizeof(file_size)) {
+            printf("Failed to receive file size\n");
+            fflush(stdout);
+            return;
+        }
+        // Convert from network byte order to host byte order
+        file_size = ntohl(file_size);
+        printf("[SERVER] Expecting to receive %u bytes for file %s\n", file_size, filename);
+        
+        // Create file
+        int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (fd < 0) {
+            printf("Failed to create file %s\n", filename);
+            fflush(stdout);
+            return;
+        }
+        printf("[SERVER] Opened file %s for writing\n", filename);
+        fflush(stdout);
+        
+        // Receive and write file data
+        char buffer[BUF_SIZE];
+        uint32_t remaining = file_size;
+        while (remaining > 0) {
+            int to_read = remaining > BUF_SIZE ? BUF_SIZE : remaining;
+            ret = sock_recv(client_fd, buffer, to_read, 0, &bytes_received, NULL);
+            if (ret != 0 || bytes_received <= 0) {
+                printf("[SERVER] Error or disconnect while receiving file data\n");
+                fflush(stdout);
+                close(fd);
+                return;
+            }
+            write(fd, buffer, bytes_received);
+            remaining -= bytes_received;
+            printf("[SERVER] Received %d bytes, %u bytes remaining\n", bytes_received, remaining);
+            fflush(stdout);
+        }
+        close(fd);
+        printf("[SERVER] Finished writing file %s\n", filename);
+        fflush(stdout);
+        
+        // Send success response
+        const char* response = "OK\n";  // Just send OK
+        char response_buf[4];  // Buffer for response
+        strcpy(response_buf, response);  // Copy response to separate buffer
+        ret = sock_send(client_fd, response_buf, strlen(response_buf), 0, &bytes_sent);
+        if (ret != 0 || bytes_sent != strlen(response_buf)) {
+            printf("Failed to send response\n");
+            fflush(stdout);
+            return;
+        }
+        printf("[SERVER] Sent response: %s", response);
+        fflush(stdout);
+        
+        // Shutdown the write side of the socket to signal EOF
+        ret = sock_shutdown(client_fd, 1);  // SHUT_WR = 1
+        if (ret != 0) {
+            printf("Failed to shutdown socket\n");
+            fflush(stdout);
+            return;
+        }
+        
+    } else if (strcmp(cmd, "GET") == 0) {
+        // Handle GET command
+        char* filename = strtok(NULL, " ");
+        if (filename == NULL) {
+            printf("Missing filename for GET command\n");
+            fflush(stdout);
+            return;
+        }
+        
+        // Open file
+        int fd = open(filename, O_RDONLY);
+        if (fd < 0) {
+            printf("File not found: %s\n", filename);
+            fflush(stdout);
+            const char* response = "ERROR: File not found\n";
+            sock_send(client_fd, response, strlen(response), 0, &bytes_sent);
+            return;
+        }
+        
+        // Get file size
+        struct stat st;
+        fstat(fd, &st);
+        uint32_t file_size = st.st_size;
+        
+        // Send file size
+        sock_send(client_fd, &file_size, sizeof(file_size), 0, &bytes_sent);
+        
+        // Send file data
+        char buffer[BUF_SIZE];
+        while (1) {
+            int nread = read(fd, buffer, BUF_SIZE);
+            if (nread <= 0) break;
+            sock_send(client_fd, buffer, nread, 0, &bytes_sent);
+        }
+        close(fd);
+        
+    } else {
+        printf("Unknown command: %s\n", cmd);
+        fflush(stdout);
+        const char* response = "ERROR: Unknown command\n";
+        sock_send(client_fd, response, strlen(response), 0, &bytes_sent);
+    }
+}
 
 int main() {
-    int server_fd, client_fd, ret;
+    int server_fd;
+    int client_fd;
+    int ret;
+    
+    // Open a socket
     ret = sock_open(2, 1, 0, &server_fd); // AF_INET=2, SOCK_STREAM=1
     if (ret != 0) {
         printf("Failed to open socket\n");
         return 1;
     }
-    ret = sock_listen(server_fd, 5);
+    printf("Server socket opened with fd: %d\n", server_fd);
+
+    // Listen on port 7000
+    ret = sock_listen(server_fd, 5); // backlog of 5
     if (ret != 0) {
         printf("Failed to listen on socket\n");
         return 1;
     }
-    printf("Image server listening on port 7000\n");
+    printf("Server listening on port 7000\n");
     fflush(stdout);
-    while (1) {
-        ret = sock_accept(server_fd, 0, &client_fd);
-        if (ret == 0) {
-            handle_client(client_fd);
-            sock_shutdown(client_fd, 3);
-        }
-    }
-    return 0;
-}
 
-void handle_client(int client_fd) {
-    char cmd_buf[16 + MAX_FILENAME];
-    int received = 0;
-    // Receive command line
-    received = 0;
-    while (received < sizeof(cmd_buf) - 1) {
-        int n = 0;
-        int ret = sock_recv(client_fd, cmd_buf + received, 1, 0, &n, NULL);
-        if (ret != 0 || n <= 0) break;
-        if (cmd_buf[received] == '\n') {
-            cmd_buf[received] = 0;
-            break;
+    // Main server loop
+    while (1) {
+        // Accept a connection
+        ret = sock_accept(server_fd, 0, &client_fd);
+        if (ret != 0) {
+            printf("Failed to accept connection (error: %d)\n", ret);
+            continue;
         }
-        received++;
+        printf("Accepted connection with client fd: %d\n", client_fd);
+        fflush(stdout);
+        // Handle client
+        handle_client(client_fd);
+
+        // Shutdown the connection
+        sock_shutdown(client_fd, 3); // SHUT_RDWR = 3
+        printf("Client connection closed\n");
     }
-    if (strncmp(cmd_buf, "SEND ", 5) == 0) {
-        char* filename = cmd_buf + 5;
-        // Receive 4 bytes (image size)
-        uint8_t size_buf[4];
-        int n = 0, got = 0;
-        while (got < 4) {
-            int ret = sock_recv(client_fd, size_buf + got, 4 - got, 0, &n, NULL);
-            if (ret != 0 || n <= 0) return;
-            got += n;
-        }
-        uint32_t img_size = (size_buf[0]<<24) | (size_buf[1]<<16) | (size_buf[2]<<8) | size_buf[3];
-        if (img_size > 10*1024*1024) return; // 10MB limit
-        // Create file
-        int img_fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-        if (img_fd < 0) return;
-        // Receive and write image data
-        uint8_t buf[BUF_SIZE];
-        uint32_t left = img_size;
-        while (left > 0) {
-            int to_read = left > BUF_SIZE ? BUF_SIZE : left;
-            int n = 0, got = 0;
-            while (got < to_read) {
-                int ret = sock_recv(client_fd, buf + got, to_read - got, 0, &n, NULL);
-                if (ret != 0 || n <= 0) { close(img_fd); return; }
-                got += n;
-            }
-            // Write to file
-            int nwritten = 0, written_total = 0;
-            while (written_total < got) {
-                nwritten = write(img_fd, buf + written_total, got - written_total);
-                if (nwritten < 0) { close(img_fd); return; }
-                written_total += nwritten;
-            }
-            left -= got;
-        }
-        close(img_fd);
-        // Optionally send OK
-        char ok[] = "OK\n";
-        int sent;
-        sock_send(client_fd, ok, strlen(ok), 0, &sent);
-    } else if (strncmp(cmd_buf, "GET ", 4) == 0) {
-        char* filename = cmd_buf + 4;
-        // Open file
-        int img_fd = open(filename, O_RDONLY);
-        if (img_fd < 0) {
-            // Not found
-            uint8_t size_buf[4] = {0,0,0,0};
-            int sent;
-            sock_send(client_fd, size_buf, 4, 0, &sent);
-            return;
-        }
-        // Stat file size (read whole file)
-        uint8_t buf[BUF_SIZE];
-        uint32_t total = 0;
-        int nread = 0;
-        while ((nread = read(img_fd, buf, BUF_SIZE)) > 0) {
-            total += nread;
-        }
-        lseek(img_fd, 0, SEEK_SET); // rewind
-        // Send size
-        uint8_t size_buf[4] = {
-            (total>>24)&0xFF, (total>>16)&0xFF, (total>>8)&0xFF, total&0xFF
-        };
-        int sent;
-        sock_send(client_fd, size_buf, 4, 0, &sent);
-        // Rewind and send file
-        lseek(img_fd, 0, SEEK_SET);
-        while ((nread = read(img_fd, buf, BUF_SIZE)) > 0) {
-            sock_send(client_fd, buf, nread, 0, &sent);
-        }
-        close(img_fd);
-    }
+
+    return 0;
 } 
