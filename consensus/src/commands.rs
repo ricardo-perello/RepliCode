@@ -42,10 +42,10 @@ pub enum Command {
 }
 
 /// Reads a WASM file from disk.
-pub fn read_wasm_file(file_path: &str) -> Vec<u8> {
-    std::fs::read(file_path).unwrap_or_else(|e| {
+pub fn read_wasm_file(file_path: &str) -> std::io::Result<Vec<u8>> {
+    std::fs::read(file_path).map_err(|e| {
         error!("Error reading WASM file {}: {}", file_path, e);
-        Vec::new()
+        e
     })
 }
 
@@ -72,7 +72,10 @@ pub fn parse_command(line: &str) -> Option<Command> {
             }
             
             let file_path = tokens[1].to_string();
-            let wasm_bytes = read_wasm_file(&file_path);
+            let wasm_bytes = match read_wasm_file(&file_path) {
+                Ok(bytes) => bytes,
+                Err(_) => return None,
+            };
             
             let mut dir_path = None;
             let mut args = Vec::new();

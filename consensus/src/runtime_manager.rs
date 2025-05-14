@@ -165,6 +165,13 @@ impl RuntimeManager {
                     if let Err(e) = stream_guard.flush() {
                         error!("Failed to flush batch {} to runtime {}: {}", batch.number, runtime_id, e);
                         error_count += 1;
+                        // Remove runtime if we get a broken pipe error
+                        if e.kind() == io::ErrorKind::BrokenPipe {
+                            let mut conns = self.runtimes.lock().unwrap();
+                            if conns.remove(&runtime_id).is_some() {
+                                info!("Removed disconnected runtime {} due to broken pipe", runtime_id);
+                            }
+                        }
                         continue;
                     }
                     // Update last processed batch
@@ -179,6 +186,13 @@ impl RuntimeManager {
                 Err(e) => {
                     error!("Failed to send batch {} to runtime {}: {}", batch.number, runtime_id, e);
                     error_count += 1;
+                    // Remove runtime if we get a broken pipe error
+                    if e.kind() == io::ErrorKind::BrokenPipe {
+                        let mut conns = self.runtimes.lock().unwrap();
+                        if conns.remove(&runtime_id).is_some() {
+                            info!("Removed disconnected runtime {} due to broken pipe", runtime_id);
+                        }
+                    }
                 }
             }
         }
