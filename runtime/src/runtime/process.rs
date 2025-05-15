@@ -6,6 +6,7 @@ use std::{
 use wasmtime::{Engine, Module, Store, Linker};
 use crate::wasi_syscalls::net::OutgoingNetworkMessage;
 use consensus::nat::NatTable;
+use crate::SANDBOX_ROOT;
 
 use crate::{
     runtime::fd_table::{FDEntry, FDTable},
@@ -115,7 +116,7 @@ pub fn start_process_from_bytes(wasm_bytes: Vec<u8>, id: u64) -> Result<Process>
     let state = Arc::new(Mutex::new(ProcessState::Ready));
     let cond = Arc::new(Condvar::new());
     let block_reason = Arc::new(Mutex::new(None));
-    let process_root = PathBuf::from("wasi_sandbox").join(format!("pid_{}", id));
+    let process_root = SANDBOX_ROOT.get().unwrap().join(format!("pid_{}", id));
     let fd_table = Arc::new(Mutex::new(FDTable::new(process_root.clone())));
     fs::create_dir_all(&process_root)?;
 
@@ -244,8 +245,7 @@ pub fn start_process(
     debug!("WASM module loaded from path: {:?}", wasm_path);
 
     // Create the sandbox directory in "wasi_sandbox/pid_<ID>"
-    let sandbox_base = PathBuf::from("wasi_sandbox");
-    create_dir_all(&sandbox_base)?;
+    let sandbox_base = SANDBOX_ROOT.get().unwrap().clone();
     let process_root_rel = sandbox_base.join(format!("pid_{}", id));
     create_dir_all(&process_root_rel)?;
     let process_root = fs::canonicalize(&process_root_rel)?;
