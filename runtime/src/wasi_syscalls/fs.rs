@@ -7,7 +7,7 @@ use wasmtime::{Caller, Extern};
 use std::io::Write;
 
 use crate::runtime::process::{ProcessData, ProcessState, BlockReason};
-use crate::runtime::fd_table::{FDEntry, MAX_FDS};
+use crate::runtime::fd_table::{FDEntry};
 const WASI_ERRNO_NOSPC: i32 = 28;  // __WASI_ERRNO_NOSPC
 const WASI_ERRNO_NOSYS: i32 = 52;  // __WASI_ERRNO_NOSYS
 
@@ -372,7 +372,7 @@ pub fn wasi_fd_close(caller: Caller<'_, ProcessData>, fd: i32) -> i32 {
     println!("fd_close: closing fd {}", fd);
     let process_data = caller.data();
     let mut table = process_data.fd_table.lock().unwrap();
-    if fd < 0 || fd as usize >= MAX_FDS {
+    if fd < 0 || fd as usize >= table.entries.len() {
         eprintln!("fd_close: invalid fd {}", fd);
         return 8; // e.g., WASI_EBADF
     }
@@ -418,7 +418,7 @@ pub fn wasi_path_open(
         return 1;
     }
     let path_str = match std::str::from_utf8(&mem_data[start..end]) {
-        Ok(s) => s,
+        Ok(s) => s.trim(),  // Trim whitespace and newlines
         Err(_) => {
             eprintln!("path_open: invalid UTF-8");
             return 1;

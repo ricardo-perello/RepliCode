@@ -264,7 +264,7 @@ pub fn process_consensus_pipe<R: Read + Write>(
                                     debug!("Network operation still waiting for process {}:{}", process_id, src_port);
                                     // Keep the process blocked
                                     let mut nat_table = process.data.nat_table.lock().unwrap();
-                                    nat_table.set_waiting_accept(process_id, src_port);
+                                    nat_table.set_waiting_accept(process_id, src_port, 0);
                                 }
                                 _ => { // Failure
                                     error!("Network operation failed for process {}:{}, status {}", process_id, src_port, status);

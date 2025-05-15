@@ -287,13 +287,22 @@ impl TcpMode {
                                     let mut buf = shared_buffer.lock().unwrap();
                                     for (msg_pid, msg_port, msg_data, is_connection) in messages {
                                         if is_connection {
+                                            // Get the new port from the NAT table
+                                            let new_port = nat_table.get_waiting_port(msg_pid, msg_port)
+                                                .unwrap_or_else(|| {
+                                                    error!("1, No waiting accept entry found for {}:{}", msg_pid, msg_port);
+                                                    msg_port + 1  // Fallback to old behavior if entry not found
+                                                });
+
                                             if let Ok(record) = write_record(&Command::NetworkIn(msg_pid, 0, vec![
                                                 1,  // Success status
                                                 msg_port as u8, (msg_port >> 8) as u8,  // Listening port
-                                                (msg_port + 1) as u8, ((msg_port + 1) >> 8) as u8  // New port
+                                                new_port as u8, (new_port >> 8) as u8  // New port from NAT table
                                             ])) {
                                                 buf.extend(record);
-                                                info!("Added connection notification for process {}:{}", msg_pid, msg_port);
+                                                info!("Added connection notification for process {}:{} -> {}", msg_pid, msg_port, new_port);
+                                                // Clear the waiting state after successfully processing the notification
+                                                nat_table.clear_waiting_accept(msg_pid, msg_port);
                                             }
                                         } else if !msg_data.is_empty() {
                                             debug!("Adding {} bytes of data for process {}:{}", msg_data.len(), msg_pid, msg_port);
@@ -353,13 +362,22 @@ impl TcpMode {
                         debug!("Processing NAT message for process {}:{} (connection: {})", 
                             pid, port, is_connection);
                         if is_connection {
+                            // Get the new port from the NAT table
+                            let new_port = nat_table.lock().unwrap().get_waiting_port(pid, port)
+                                .unwrap_or_else(|| {
+                                    error!("2, No waiting accept entry found for {}:{}", pid, port);
+                                    port + 1  // Fallback to old behavior if entry not found
+                                });
+
                             if let Ok(record) = write_record(&Command::NetworkIn(pid, 0, vec![
                                 1,  // Success status
                                 port as u8, (port >> 8) as u8,  // Listening port
-                                (port + 1) as u8, ((port + 1) >> 8) as u8  // New port
+                                new_port as u8, (new_port >> 8) as u8  // New port from NAT table
                             ])) {
                                 buf.extend(record);
-                                info!("Added connection notification for process {}:{}", pid, port);
+                                info!("Added connection notification for process {}:{} -> {}", pid, port, new_port);
+                                // Clear the waiting state after successfully processing the notification
+                                nat_table.lock().unwrap().clear_waiting_accept(pid, port);
                             }
                         } else if !data.is_empty() {
                             debug!("Adding {} bytes of data for process {}:{}", data.len(), pid, port);

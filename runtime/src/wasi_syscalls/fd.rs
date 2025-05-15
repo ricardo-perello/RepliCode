@@ -174,7 +174,7 @@ pub fn wasi_fd_prestat_get(
     let (is_preopen, is_dir) = {
         let pd = caller.data();
         let table = pd.fd_table.lock().unwrap();
-        if fd < 0 || (fd as usize) >= crate::runtime::fd_table::MAX_FDS {
+        if fd < 0 || (fd as usize) >= table.entries.len() {
             return 8; // invalid FD
         }
         match &table.entries[fd as usize] {
