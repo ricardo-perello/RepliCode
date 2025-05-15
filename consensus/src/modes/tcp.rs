@@ -98,6 +98,7 @@ impl TcpMode {
                 
                 // Append clock record for 10 seconds
                 if let Ok(clock_record) = write_record(&Command::Clock(10_000_000_000)) {
+                if let Ok(clock_record) = write_record(&Command::Clock(10_000_000_000)) {
                     buf.extend(clock_record);
                     debug!("Added clock record for 10 seconds");
                 } else {
