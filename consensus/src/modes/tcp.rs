@@ -30,7 +30,10 @@ impl TcpMode {
         
         // Initialize batch history first
         let date = Local::now().format("%Y%m%d-%H%M%S").to_string();
-        let history_path = PathBuf::from(format!("session-{}.bin", date));
+        // Create sessions directory if it doesn't exist
+        let sessions_dir = PathBuf::from("sessions");
+        std::fs::create_dir_all(&sessions_dir)?;
+        let history_path = sessions_dir.join(format!("session-{}.bin", date));
         let batch_history: Arc<Mutex<BatchHistory>> = Arc::new(Mutex::new(BatchHistory::new(&history_path)?));
         
         let runtime_manager = RuntimeManager::new("127.0.0.1:9000", Arc::clone(&batch_history))?;

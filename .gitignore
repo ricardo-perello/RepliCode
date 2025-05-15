@@ -2,6 +2,10 @@
 .DS_Store
 Thumbs.db
 
+# Session files
+sessions/
+sessions/*.bin
+
 # macOS-specific files
 *.swp
 *.swo
