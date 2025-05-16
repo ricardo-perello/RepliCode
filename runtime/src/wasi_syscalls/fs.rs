@@ -24,10 +24,11 @@ fn io_err_to_wasi_errno(e: &io::Error) -> i32 {
 
 /// If you want to block for file I/O
 fn block_process_for_fileio(caller: &mut Caller<'_, ProcessData>) {
+    let process_id = caller.data().id;
     {
         let mut state = caller.data().state.lock().unwrap();
         if *state == ProcessState::Running {
-            println!("path_open / fd_readdir: Setting process state to Blocked (FileIO).");
+            println!("Process {}: Setting process state to Blocked (FileIO).", process_id);
             *state = ProcessState::Blocked;
         }
         let mut reason = caller.data().block_reason.lock().unwrap();
@@ -38,6 +39,7 @@ fn block_process_for_fileio(caller: &mut Caller<'_, ProcessData>) {
     while *state != ProcessState::Running {
         state = caller.data().cond.wait(state).unwrap();
     }
+    println!("Process {}: Resuming after FileIO block.", process_id);
 }
 
 // ----------------------------------------------------------------------------

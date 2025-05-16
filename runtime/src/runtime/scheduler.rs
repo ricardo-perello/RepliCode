@@ -171,6 +171,12 @@ where
                                     Err(_errno) => false // If flush fails, keep the process blocked.
                                 }
                             }
+                            Some(BlockReason::FileIO) => {
+                                // For FileIO, immediately unblock the process 
+                                // This is used for simulating I/O wait for large file reads
+                                debug!("Unblocking process {} that was waiting for FileIO", proc.id);
+                                true
+                            }
                             Some(BlockReason::Timeout { resume_after }) => GlobalClock::now() >= resume_after,
                             Some(BlockReason::NetworkIO) => {
                                 let nat_table = proc.data.nat_table.lock().unwrap();
