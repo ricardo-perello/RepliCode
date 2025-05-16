@@ -184,9 +184,10 @@ where
                                 
                                 let mut should_block = false;
                                 for entry in fd_table.entries.iter() {
-                                    if let Some(FDEntry::Socket { local_port, buffer, .. }) = entry {
+                                    if let Some(FDEntry::Socket { local_port, buffer, is_listener, .. }) = entry {
                                         if nat_table.is_waiting_for_accept(proc.id, *local_port) || 
-                                           (nat_table.is_waiting_for_recv(proc.id, *local_port) && buffer.is_empty()) {
+                                           (nat_table.is_waiting_for_recv(proc.id, *local_port) && buffer.is_empty()) ||
+                                           (*is_listener && !nat_table.has_port_mapping(proc.id, *local_port)) {
                                             should_block = true;
                                             break;
                                         }
@@ -223,7 +224,7 @@ where
 
                 if ready_queue.is_empty() {
                     debug!("No processes unblocked; scheduler sleeping briefly.");
-                    thread::sleep(Duration::from_millis(10));
+                    //thread::sleep(Duration::from_millis(10));
                 }
             }
         }
