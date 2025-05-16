@@ -215,10 +215,11 @@ pub fn wasi_sock_listen(
         let process_data = caller.data();
         pid = process_data.id;
         debug!("Processing listen request for process {}", pid);
-        let table = process_data.fd_table.lock().unwrap();
-        if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, .. })) = table.entries.get(fd as usize) {
+        let mut table = process_data.fd_table.lock().unwrap();
+        if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, is_listener, .. })) = table.entries.get_mut(fd as usize) {
             src_port = *local_port;
-            debug!("Found socket FD {} for process {}:{}", fd, pid, src_port);
+            *is_listener = true;
+            debug!("Found socket FD {} for process {}:{} and marked as listener", fd, pid, src_port);
         } else {
             error!("Invalid socket FD {} for process {}", fd, pid);
             return 1; // Invalid FD
