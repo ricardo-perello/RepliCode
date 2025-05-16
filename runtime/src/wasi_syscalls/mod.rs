@@ -34,7 +34,7 @@ pub fn register(linker: &mut Linker<ProcessData>) -> Result<()> {
     linker.func_wrap("wasi_snapshot_preview1", "fd_datasync", fd_ops::wasi_fd_datasync)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_fdstat_set_flags", fd_ops::wasi_fd_fdstat_set_flags)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_fdstat_set_rights", fd_ops::wasi_fd_fdstat_set_rights)?;
-    linker.func_wrap("wasi_snapshot_preview1", "fd_filestat_get", fd_ops::wasi_fd_filestat_get)?;
+    linker.func_wrap("wasi_snapshot_preview1", "fd_filestat_get", fs::wasi_fd_filestat_get)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_filestat_set_size", fd_ops::wasi_fd_filestat_set_size)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_filestat_set_times", fd_ops::wasi_fd_filestat_set_times)?;
     linker.func_wrap("wasi_snapshot_preview1", "fd_pread", fd_ops::wasi_fd_pread)?;
@@ -79,6 +79,7 @@ pub fn register(linker: &mut Linker<ProcessData>) -> Result<()> {
     linker.func_wrap("wasi_snapshot_preview1", "sock_recv", net::wasi_sock_recv)?;
     linker.func_wrap("wasi_snapshot_preview1", "sock_send", net::wasi_sock_send)?;
     linker.func_wrap("wasi_snapshot_preview1", "sock_shutdown", net::wasi_sock_shutdown)?;
+    linker.func_wrap("wasi_snapshot_preview1", "sock_close", net::wasi_sock_close)?;
 
     Ok(())
 }

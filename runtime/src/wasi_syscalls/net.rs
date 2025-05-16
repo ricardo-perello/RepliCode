@@ -168,11 +168,14 @@ pub fn wasi_sock_close(
     let process_data = caller.data();
     let pid = process_data.id;
     
-    // Get socket FD entry
+    // Get socket FD entry and deallocate it
     let src_port = {
-        let table = process_data.fd_table.lock().unwrap();
+        let mut table = process_data.fd_table.lock().unwrap();
         if let Some(Some(crate::runtime::fd_table::FDEntry::Socket { local_port, .. })) = table.entries.get(fd as usize) {
-            *local_port
+            let port = *local_port;
+            // Deallocate the FD immediately
+            table.deallocate_fd(fd);
+            port
         } else {
             error!("Invalid socket FD {} for process {}", fd, pid);
             return 1; // Invalid FD
@@ -193,6 +196,8 @@ pub fn wasi_sock_close(
     // Block until consensus processes this
     debug!("Blocking process {} for network operation", pid);
     block_process_for_network(&mut caller);
+    
+    // Return success since we've already deallocated the FD
     0
 }
 

@@ -54,6 +54,8 @@ fn get_file(stream: &mut TcpStream, filename: &str) -> io::Result<()> {
     // Read file size
     let mut size_buf = [0u8; 4];
     stream.read_exact(&mut size_buf)?;
+    println!("[CLIENT] Raw size bytes: {:02x} {:02x} {:02x} {:02x}", 
+             size_buf[0], size_buf[1], size_buf[2], size_buf[3]);
     let file_size = u32::from_be_bytes(size_buf);
     println!("[CLIENT] Expecting to receive file '{}' ({} bytes)", filename, file_size);
     

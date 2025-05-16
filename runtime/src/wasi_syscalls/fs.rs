@@ -2,12 +2,12 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
-use log::error;
+use log::{error, debug};
 use wasmtime::{Caller, Extern};
 use std::io::Write;
 
 use crate::runtime::process::{ProcessData, ProcessState, BlockReason};
-use crate::runtime::fd_table::{FDEntry, MAX_FDS};
+use crate::runtime::fd_table::{FDEntry};
 const WASI_ERRNO_NOSPC: i32 = 28;  // __WASI_ERRNO_NOSPC
 const WASI_ERRNO_NOSYS: i32 = 52;  // __WASI_ERRNO_NOSYS
 
@@ -94,6 +94,113 @@ pub fn get_dir_size(path: &Path) -> io::Result<u64> {
 // ----------------------------------------------------------------------------
 // File/directory ops below
 // ----------------------------------------------------------------------------
+
+/// Write a full 64-byte WASI filestat struct based on our FDEntry.
+pub fn wasi_fd_filestat_get(
+    mut caller: Caller<ProcessData>,
+    fd: u32,
+    buf_ptr: u32,
+) -> anyhow::Result<u32> {
+    debug!("wasi_fd_filestat_get: fd={}, buf_ptr={}", fd, buf_ptr);
+    
+    // Get FD entry
+    let (size, filetype) = {
+        let process_data = caller.data();
+        let table = process_data.fd_table.lock().unwrap();
+        debug!("wasi_fd_filestat_get: checking fd {} in table with {} entries", fd, table.entries.len());
+        
+        if fd as usize >= table.entries.len() {
+            debug!("wasi_fd_filestat_get: fd {} out of bounds", fd);
+            return Ok(8); // WASI_EBADF
+        }
+        
+        match &table.entries[fd as usize] {
+            Some(FDEntry::File { buffer, is_directory, host_path, .. }) => {
+                debug!("wasi_fd_filestat_get: found File entry - buffer.len={}, is_dir={}, host_path={:?}", 
+                    buffer.len(), is_directory, host_path);
+                
+                let size = if !buffer.is_empty() {
+                    debug!("wasi_fd_filestat_get: using buffer size {}", buffer.len());
+                    buffer.len() as u64
+                } else {
+                    match host_path {
+                        Some(path) => {
+                            debug!("wasi_fd_filestat_get: buffer empty, trying metadata for {}", path);
+                            match std::fs::metadata(path) {
+                                Ok(metadata) => {
+                                    let size = metadata.len();
+                                    debug!("wasi_fd_filestat_get: got metadata size {}", size);
+                                    size
+                                },
+                                Err(e) => {
+                                    debug!("wasi_fd_filestat_get: metadata error: {}", e);
+                                    return Ok(8); // WASI_EBADF
+                                }
+                            }
+                        },
+                        None => {
+                            debug!("wasi_fd_filestat_get: no host_path available");
+                            0
+                        }
+                    }
+                };
+                (size, if *is_directory { 3u8 } else { 4u8 })
+            }
+            Some(FDEntry::Socket { .. }) => {
+                debug!("wasi_fd_filestat_get: found Socket entry");
+                (0, 5u8) // Socket type
+            }
+            None => {
+                debug!("wasi_fd_filestat_get: no entry found for fd {}", fd);
+                return Ok(8); // WASI_EBADF
+            }
+        }
+    };
+
+    debug!("wasi_fd_filestat_get: computed size={}, filetype={}", size, filetype);
+
+    // Create filestat buffer (64 bytes)
+    let mut buf = [0u8; 64];
+    
+    // st_dev (8 bytes) - set to 0
+    buf[0..8].copy_from_slice(&0u64.to_le_bytes());
+    
+    // st_ino (8 bytes) - set to 0
+    buf[8..16].copy_from_slice(&0u64.to_le_bytes());
+    
+    // st_filetype (1 byte)
+    buf[16] = filetype;
+    // 17-23: padding (already zero)
+    
+    // st_nlink (8 bytes)
+    buf[24..32].copy_from_slice(&1u64.to_le_bytes());
+    
+    // st_size (8 bytes)
+    buf[32..40].copy_from_slice(&size.to_le_bytes());
+    debug!("wasi_fd_filestat_get: writing size {} to buffer at offset 32", size);
+    
+    // st_atim (8 bytes) - set to 0
+    buf[40..48].copy_from_slice(&0u64.to_le_bytes());
+    
+    // st_mtim (8 bytes) - set to 0
+    buf[48..56].copy_from_slice(&0u64.to_le_bytes());
+    
+    // st_ctim (8 bytes) - set to 0
+    buf[56..64].copy_from_slice(&0u64.to_le_bytes());
+
+    // Write to memory
+    let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+    let mem = memory.data_mut(&mut caller);
+    let ptr = buf_ptr as usize;
+    if ptr + 64 > mem.len() {
+        debug!("wasi_fd_filestat_get: buffer out of bounds");
+        return Ok(21); // WASI_EFAULT
+    }
+    mem[ptr..ptr+64].copy_from_slice(&buf);
+    debug!("wasi_fd_filestat_get: wrote filestat to memory at offset {}", ptr);
+    
+    Ok(0)
+}
 
 pub fn wasi_path_unlink_file(
     mut caller: wasmtime::Caller<'_, ProcessData>,
@@ -372,7 +479,7 @@ pub fn wasi_fd_close(caller: Caller<'_, ProcessData>, fd: i32) -> i32 {
     println!("fd_close: closing fd {}", fd);
     let process_data = caller.data();
     let mut table = process_data.fd_table.lock().unwrap();
-    if fd < 0 || fd as usize >= MAX_FDS {
+    if fd < 0 || fd as usize >= table.entries.len() {
         eprintln!("fd_close: invalid fd {}", fd);
         return 8; // e.g., WASI_EBADF
     }
@@ -418,7 +525,7 @@ pub fn wasi_path_open(
         return 1;
     }
     let path_str = match std::str::from_utf8(&mem_data[start..end]) {
-        Ok(s) => s,
+        Ok(s) => s.trim(),  // Trim whitespace and newlines
         Err(_) => {
             eprintln!("path_open: invalid UTF-8");
             return 1;
@@ -494,6 +601,9 @@ pub fn wasi_path_open(
     // 5) Get metadata or create file if it does not exist and O_CREAT is set.
     // Let's assume that O_CREAT is indicated by bit 0x1.
     let o_creat = (oflags & 1) != 0;
+    let is_readable = (oflags & 0x1) == 0; // O_RDONLY or O_RDWR
+    let is_writable = (oflags & 0x2) != 0; // O_WRONLY or O_RDWR
+
     let (is_dir, file_data) = match fs::metadata(&canonical) {
         Ok(md) => {
             if md.is_dir() {
@@ -517,18 +627,26 @@ pub fn wasi_path_open(
                 }
                 (true, buf)
             } else {
-                // It's a file: read file content.
-                let file_data = match fs::read(&canonical) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        eprintln!("path_open: Failed to read file: {}", e);
-                        return io_err_to_wasi_errno(&e);
+                // It's a file: read file content if readable
+                let file_data = if is_readable {
+                    match fs::read(&canonical) {
+                        Ok(data) => {
+                            debug!("DEBUG: file_data.len() = {}", data.len());
+                            debug!("DEBUG: host_path = {:?}", canonical);
+                            if data.len() > 1_000_000 {
+                                debug!("path_open: File is large => blocking to simulate I/O wait");
+                                block_process_for_fileio(&mut caller);
+                            }
+                            data
+                        },
+                        Err(e) => {
+                            eprintln!("path_open: Failed to read file: {}", e);
+                            return io_err_to_wasi_errno(&e);
+                        }
                     }
+                } else {
+                    Vec::new()
                 };
-                if file_data.len() > 1_000_000 {
-                    println!("path_open: File is large => blocking to simulate I/O wait");
-                    block_process_for_fileio(&mut caller);
-                }
                 (false, file_data)
             }
         }
@@ -542,8 +660,11 @@ pub fn wasi_path_open(
                 {
                     Ok(_f) => {
                         // File is now created (empty).
-                        let file_data = fs::read(&canonical).unwrap_or_default();
-                        // (Optionally: update disk usage here with file metadata overhead)
+                        let file_data = if is_readable {
+                            fs::read(&canonical).unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
                         (false, file_data)
                     }
                     Err(e) => {

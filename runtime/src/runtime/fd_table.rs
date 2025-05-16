@@ -68,47 +68,45 @@ impl FDEntry {
     }
 }
 
-pub const MAX_FDS: usize = 8; // or bigger if needed
-
 pub struct FDTable {
-    pub entries: [Option<FDEntry>; MAX_FDS],
+    pub entries: Vec<Option<FDEntry>>,
 }
 
 impl FDTable {
     pub fn new(process_root: PathBuf) -> Self {
         let mut table = FDTable {
-            entries: Default::default(),
+            entries: Vec::with_capacity(32), // Start with capacity for 32 entries
         };
         
         // Initialize standard file descriptors (stdin, stdout, stderr)
-        table.entries[0] = Some(FDEntry::File {  // stdin
+        table.entries.push(Some(FDEntry::File {  // stdin
             buffer: Vec::new(),
             read_ptr: 0,
             is_directory: false,
             is_preopen: false,
             host_path: None,
-        });
-        table.entries[1] = Some(FDEntry::File {  // stdout
+        }));
+        table.entries.push(Some(FDEntry::File {  // stdout
             buffer: Vec::new(),
             read_ptr: 0,
             is_directory: false,
             is_preopen: false,
             host_path: None,
-        });
-        table.entries[2] = Some(FDEntry::File {  // stderr
+        }));
+        table.entries.push(Some(FDEntry::File {  // stderr
             buffer: Vec::new(),
             read_ptr: 0,
             is_directory: false,
             is_preopen: false,
             host_path: None,
-        });
-        table.entries[3] = Some(FDEntry::File {
+        }));
+        table.entries.push(Some(FDEntry::File {
             buffer: Vec::new(),
             read_ptr: 0,
             is_directory: true,
             is_preopen: true,
             host_path: Some(process_root.to_string_lossy().into_owned()),
-        });
+        }));
         table
     }
 
@@ -126,25 +124,29 @@ impl FDTable {
 
     /// Helper to get a mutable reference to the FD entry or return an error.
     pub fn get_fd_entry_mut(&mut self, fd: i32) -> Option<&mut FDEntry> {
-        if fd < 0 || fd as usize >= MAX_FDS {
+        if fd < 0 {
             return None;
         }
-        self.entries[fd as usize].as_mut()
+        self.entries.get_mut(fd as usize).and_then(|e| e.as_mut())
     }
 
     pub fn allocate_fd(&mut self) -> i32 {
-        for i in 0..MAX_FDS {
-            if self.entries[i].is_none() {
-                // We'll fill it later in the actual open call
+        // First try to find an existing empty slot
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.is_none() {
                 return i as i32;
             }
         }
-        -1 // no free FD
+        
+        // If no empty slots, grow the vector and return the new index
+        let new_fd = self.entries.len() as i32;
+        self.entries.push(None);
+        new_fd
     }
 
     /// Mark an FD slot as closed
     pub fn deallocate_fd(&mut self, fd: i32) {
-        if fd >= 0 && (fd as usize) < MAX_FDS {
+        if fd >= 0 && (fd as usize) < self.entries.len() {
             self.entries[fd as usize] = None;
         }
     }

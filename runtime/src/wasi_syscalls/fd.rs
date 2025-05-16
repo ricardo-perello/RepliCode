@@ -7,16 +7,128 @@ use log::{info, error};
 
 
 
-/// Dummy implementation for fd_fdstat_get: logs the call.
-pub fn wasi_fd_fdstat_get(_caller: Caller<'_, ProcessData>, fd: i32, _buf: i32) -> i32 {
+/// Implementation of fd_fdstat_get: returns file descriptor status information.
+pub fn wasi_fd_fdstat_get(mut caller: Caller<'_, ProcessData>, fd: i32, buf: i32) -> i32 {
     info!("Called fd_fdstat_get with fd: {}", fd);
-    0
+    
+    // Get memory export
+    let memory = match caller.get_export("memory") {
+        Some(wasmtime::Extern::Memory(mem)) => mem,
+        _ => {
+            error!("fd_fdstat_get: no memory export found");
+            return 1;
+        }
+    };
+
+    // Get FD entry
+    let fd_entry = {
+        let process_data = caller.data();
+        let table = process_data.fd_table.lock().unwrap();
+        if fd < 0 || (fd as usize) >= table.entries.len() {
+            return 8; // WASI_EBADF
+        }
+        table.entries[fd as usize].clone()
+    };
+
+    // Create fdstat buffer
+    let mut fdstat = [0u8; 24]; // WASI fdstat struct size
+    
+    // Set file type (0=unknown, 1=block device, 2=character device, 3=directory, 4=regular file)
+    if let Some(entry) = fd_entry {
+        match entry {
+            FDEntry::File { is_directory, .. } => {
+                fdstat[0] = if is_directory { 3 } else { 4 };
+            }
+            FDEntry::Socket { .. } => {
+                fdstat[0] = 5; // Socket type
+            }
+        }
+    }
+
+    // Set flags (0 for now)
+    fdstat[2..4].copy_from_slice(&0u16.to_le_bytes());
+
+    // Set rights (full rights for now)
+    fdstat[8..16].copy_from_slice(&u64::MAX.to_le_bytes());  // fs_rights_base
+    fdstat[16..24].copy_from_slice(&u64::MAX.to_le_bytes()); // fs_rights_inheriting
+
+    // Write fdstat to memory
+    let mem_mut = memory.data_mut(&mut caller);
+    let buf_ptr = buf as usize;
+    if buf_ptr + 24 > mem_mut.len() {
+        error!("fd_fdstat_get: buffer out of bounds");
+        return 1;
+    }
+    mem_mut[buf_ptr..buf_ptr + 24].copy_from_slice(&fdstat);
+
+    0 // Success
 }
 
-/// Dummy implementation for fd_seek: logs the call.
-pub fn wasi_fd_seek(_caller: Caller<'_, ProcessData>, fd: i32, offset: i64, whence: i32, _newoffset: i32) -> i32 {
+/// Implementation of fd_seek: changes file position and returns new position.
+pub fn wasi_fd_seek(
+    mut caller: Caller<'_, ProcessData>,
+    fd: i32,
+    offset: i64,
+    whence: i32,
+    newoffset: i32,
+) -> i32 {
     info!("Called fd_seek with fd: {}, offset: {}, whence: {}", fd, offset, whence);
-    0
+    
+    // Get memory export
+    let memory = match caller.get_export("memory") {
+        Some(wasmtime::Extern::Memory(mem)) => mem,
+        _ => {
+            error!("fd_seek: no memory export found");
+            return 1;
+        }
+    };
+
+    // Get current position and buffer length
+    let (current_pos, buffer_len) = {
+        let process_data = caller.data();
+        let mut table = process_data.fd_table.lock().unwrap();
+        if fd < 0 || (fd as usize) >= table.entries.len() {
+            return 8; // WASI_EBADF
+        }
+        match &mut table.entries[fd as usize] {
+            Some(FDEntry::File { read_ptr, buffer, .. }) => (*read_ptr as i64, buffer.len() as i64),
+            _ => return 8, // WASI_EBADF
+        }
+    };
+
+    // Calculate new position based on whence
+    let new_pos = match whence {
+        0 => offset,                    // SEEK_SET
+        1 => current_pos + offset,      // SEEK_CUR
+        2 => buffer_len + offset,       // SEEK_END
+        _ => return 28,                 // WASI_EINVAL
+    };
+
+    // Check bounds
+    if new_pos < 0 || new_pos > buffer_len {
+        return 28; // WASI_EINVAL
+    }
+
+    // Update position
+    {
+        let process_data = caller.data();
+        let mut table = process_data.fd_table.lock().unwrap();
+        if let Some(FDEntry::File { read_ptr, .. }) = table.get_fd_entry_mut(fd) {
+            *read_ptr = new_pos as usize;
+        }
+    }
+
+    // Write new position to memory if requested
+    if newoffset != 0 {
+        let mem_mut = memory.data_mut(&mut caller);
+        let out_ptr = newoffset as usize;
+        if out_ptr + 8 > mem_mut.len() {
+            return 1;
+        }
+        mem_mut[out_ptr..out_ptr + 8].copy_from_slice(&new_pos.to_le_bytes());
+    }
+
+    0 // Success
 }
 
 pub fn wasi_fd_read(
@@ -27,7 +139,7 @@ pub fn wasi_fd_read(
     nread: i32,
 ) -> i32 {
     loop {
-        let (data_to_read, bytes_to_advance) = {
+        let (data_to_read, _) = {
             let process_data = caller.data();
             let mut table = process_data.fd_table.lock().unwrap();
             match table.get_fd_entry_mut(fd) {
@@ -56,9 +168,9 @@ pub fn wasi_fd_read(
             }
         };
 
-        {
+        let total_read = {
             // First, determine how many bytes will be read using the iovecs.
-            let mut total_read = 0;
+            let mut total = 0;
             {
                 let data = memory.data(&caller);
                 for i in 0..iovs_len {
@@ -75,12 +187,12 @@ pub fn wasi_fd_read(
                         error!("data slice out of bounds");
                         return 1;
                     }
-                    let to_copy = std::cmp::min(len, data_to_read.len() - total_read);
+                    let to_copy = std::cmp::min(len, data_to_read.len() - total);
                     if to_copy == 0 {
                         break;
                     }
-                    total_read += to_copy;
-                    if total_read >= data_to_read.len() {
+                    total += to_copy;
+                    if total >= data_to_read.len() {
                         break;
                     }
                 }
@@ -88,7 +200,7 @@ pub fn wasi_fd_read(
 
             // Now actually write the data into the WASM memory.
             let data_mut = memory.data_mut(&mut caller);
-            let mut total_read = 0;
+            let mut total = 0;
             for i in 0..iovs_len {
                 let iovec_addr = (iovs as usize) + (i as usize) * 8;
                 if iovec_addr + 8 > data_mut.len() {
@@ -103,33 +215,34 @@ pub fn wasi_fd_read(
                     error!("data slice out of bounds");
                     return 1;
                 }
-                let to_copy = std::cmp::min(len, data_to_read.len() - total_read);
+                let to_copy = std::cmp::min(len, data_to_read.len() - total);
                 if to_copy == 0 {
                     break;
                 }
                 data_mut[offset..offset + to_copy]
-                    .copy_from_slice(&data_to_read[total_read..total_read + to_copy]);
-                total_read += to_copy;
-                if total_read >= data_to_read.len() {
+                    .copy_from_slice(&data_to_read[total..total + to_copy]);
+                total += to_copy;
+                if total >= data_to_read.len() {
                     break;
                 }
             }
             // Write the total number of bytes read into memory.
-            let total_read_bytes = (total_read as u32).to_le_bytes();
+            let total_read_bytes = (total as u32).to_le_bytes();
             let nread_ptr = nread as usize;
             if nread_ptr + 4 > data_mut.len() {
                 error!("nread pointer out of bounds");
                 return 1;
             }
             data_mut[nread_ptr..nread_ptr + 4].copy_from_slice(&total_read_bytes);
-        }
+            total
+        };
 
-        // After reading, update the FD's read pointer.
+        // After reading, update the FD's read pointer by the actual bytes read
         {
             let process_data = caller.data();
             let mut table = process_data.fd_table.lock().unwrap();
             if let Some(FDEntry::File { read_ptr, .. }) = table.get_fd_entry_mut(fd) {
-                *read_ptr += bytes_to_advance;
+                *read_ptr += total_read;
             }
         }
         return 0;
@@ -174,7 +287,7 @@ pub fn wasi_fd_prestat_get(
     let (is_preopen, is_dir) = {
         let pd = caller.data();
         let table = pd.fd_table.lock().unwrap();
-        if fd < 0 || (fd as usize) >= crate::runtime::fd_table::MAX_FDS {
+        if fd < 0 || (fd as usize) >= table.entries.len() {
             return 8; // invalid FD
         }
         match &table.entries[fd as usize] {
