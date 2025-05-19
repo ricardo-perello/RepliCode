@@ -40,7 +40,7 @@ pub fn run_test_client() {
                 }
 
                 // Send the message
-                if let Err(e) = writeln!(stream, "{}", message) {
+                if let Err(e) = write!(stream, "{}", message) {
                     eprintln!("Failed to send message: {}", e);
                     break;
                 }
