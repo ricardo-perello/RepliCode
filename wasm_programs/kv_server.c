@@ -48,7 +48,14 @@ char keys[MAX_ENTRIES][MAX_KEY];
 char values[MAX_ENTRIES][MAX_VAL];
 int num_entries = 0;
 
-void handle_client(int client_fd);
+// Helper function to trim whitespace and newlines from the end of a string
+void trim_end(char *str) {
+    int len = strlen(str);
+    while (len > 0 && (str[len-1] == ' ' || str[len-1] == '\n' || str[len-1] == '\r')) {
+        str[len-1] = '\0';
+        len--;
+    }
+}
 
 // In-memory implementation
 int set_key(const char* key, const char* value) {
@@ -128,15 +135,6 @@ int del_key(const char* key) {
     return -1;
 }
 
-// Helper function to trim whitespace and newlines from the end of a string
-void trim_end(char *str) {
-    int len = strlen(str);
-    while (len > 0 && (str[len-1] == ' ' || str[len-1] == '\n' || str[len-1] == '\r')) {
-        str[len-1] = '\0';
-        len--;
-    }
-}
-
 void handle_client(int client_fd) {
     char cmd_buf[MAX_CMD_SIZE];
     int bytes_received;
@@ -146,7 +144,7 @@ void handle_client(int client_fd) {
     printf("[SERVER] New client connection on fd %d\n", client_fd);
     fflush(stdout);
     
-    // Receive command
+    // Receive command - character by character until we hit a newline
     int total_received = 0;
     while (total_received < MAX_CMD_SIZE - 1) {
         ret = sock_recv(client_fd, cmd_buf + total_received, 1, 0, &bytes_received, NULL);
@@ -170,50 +168,77 @@ void handle_client(int client_fd) {
     printf("[SERVER] Received command (%d bytes): %s", total_received, cmd_buf);
     fflush(stdout);
 
-    // Process the command
-    if (strncmp(cmd_buf, "SET ", 4) == 0) {
-        char* key_start = cmd_buf + 4;
-        char* value_start = strchr(key_start, ' ');
+    // Process the command using strtok like image_server
+    char* cmd = strtok(cmd_buf, " ");
+    if (cmd == NULL) {
+        printf("[SERVER] Invalid command format - no command found\n");
+        fflush(stdout);
+        sock_close(client_fd);
+        return;
+    }
+
+    if (strcasecmp(cmd, "SET") == 0) {
+        char* key = strtok(NULL, " ");
+        if (key == NULL) {
+            printf("[SERVER] Missing key for SET command\n");
+            fflush(stdout);
+            const char* response = "ERR: Missing key\n";
+            sock_send(client_fd, response, strlen(response), 0, &bytes_sent);
+            sock_shutdown(client_fd, 1);
+            sock_close(client_fd);
+            return;
+        }
         
-        if (value_start != NULL) {
-            *value_start = '\0';  // Split string at space
-            value_start++;        // Move to start of value
-            
-            trim_end(key_start);  // Remove any trailing whitespace
-            trim_end(value_start);
-            
-            printf("[SERVER] Processing SET request for key: '%s' value: '%s'\n", key_start, value_start);
+        char* value = strtok(NULL, "\n");
+        if (value == NULL) {
+            printf("[SERVER] Missing value for SET command\n");
             fflush(stdout);
-            
-            int result = set_key(key_start, value_start);
-            printf("[SERVER] set_key() returned %d\n", result);
-            fflush(stdout);
-            
-            if (result == 0) {
-                const char* response = "OK\n";
-                ret = sock_send(client_fd, response, strlen(response), 0, &bytes_sent);
-                if (ret != 0 || bytes_sent != strlen(response)) {
-                    printf("[SERVER] Failed to send response (ret=%d, bytes=%d)\n", ret, bytes_sent);
-                    fflush(stdout);
-                }
-            } else {
-                const char* response = "ERR 1\n";
-                ret = sock_send(client_fd, response, strlen(response), 0, &bytes_sent);
-                if (ret != 0 || bytes_sent != strlen(response)) {
-                    printf("[SERVER] Failed to send response (ret=%d, bytes=%d)\n", ret, bytes_sent);
-                    fflush(stdout);
-                }
+            const char* response = "ERR: Missing value\n";
+            sock_send(client_fd, response, strlen(response), 0, &bytes_sent);
+            sock_shutdown(client_fd, 1);
+            sock_close(client_fd);
+            return;
+        }
+        
+        // Trim whitespace
+        trim_end(key);
+        // Skip leading whitespace in value
+        while (*value == ' ') value++;
+        trim_end(value);
+        
+        printf("[SERVER] Processing SET request for key: '%s' value: '%s'\n", key, value);
+        fflush(stdout);
+        
+        int result = set_key(key, value);
+        
+        if (result == 0) {
+            const char* response = "OK\n";
+            ret = sock_send(client_fd, response, strlen(response), 0, &bytes_sent);
+            if (ret != 0 || bytes_sent != strlen(response)) {
+                printf("[SERVER] Failed to send response (ret=%d, bytes=%d)\n", ret, bytes_sent);
+                fflush(stdout);
             }
         } else {
-            const char* response = "ERR: Invalid SET format\n";
+            const char* response = "ERR 1\n";
             ret = sock_send(client_fd, response, strlen(response), 0, &bytes_sent);
             if (ret != 0 || bytes_sent != strlen(response)) {
                 printf("[SERVER] Failed to send response (ret=%d, bytes=%d)\n", ret, bytes_sent);
                 fflush(stdout);
             }
         }
-    } else if (strncmp(cmd_buf, "GET ", 4) == 0) {
-        char* key = cmd_buf + 4;
+    } 
+    else if (strcasecmp(cmd, "GET") == 0) {
+        char* key = strtok(NULL, "\n");
+        if (key == NULL) {
+            printf("[SERVER] Missing key for GET command\n");
+            fflush(stdout);
+            const char* response = "ERR: Missing key\n";
+            sock_send(client_fd, response, strlen(response), 0, &bytes_sent);
+            sock_shutdown(client_fd, 1);
+            sock_close(client_fd);
+            return;
+        }
+        
         trim_end(key);
         char value[MAX_VAL];
         
@@ -236,8 +261,19 @@ void handle_client(int client_fd) {
                 fflush(stdout);
             }
         }
-    } else if (strncmp(cmd_buf, "DEL ", 4) == 0) {
-        char* key = cmd_buf + 4;
+    } 
+    else if (strcasecmp(cmd, "DEL") == 0) {
+        char* key = strtok(NULL, "\n");
+        if (key == NULL) {
+            printf("[SERVER] Missing key for DEL command\n");
+            fflush(stdout);
+            const char* response = "ERR: Missing key\n";
+            sock_send(client_fd, response, strlen(response), 0, &bytes_sent);
+            sock_shutdown(client_fd, 1);
+            sock_close(client_fd);
+            return;
+        }
+        
         trim_end(key);
         
         printf("[SERVER] Processing DEL request for key: '%s'\n", key);
@@ -258,14 +294,18 @@ void handle_client(int client_fd) {
                 fflush(stdout);
             }
         }
-    } else if (strncmp(cmd_buf, "QUIT", 4) == 0) {
+    } 
+    else if (strcasecmp(cmd, "QUIT") == 0) {
         const char* response = "BYE\n";
         ret = sock_send(client_fd, response, strlen(response), 0, &bytes_sent);
         if (ret != 0 || bytes_sent != strlen(response)) {
             printf("[SERVER] Failed to send response (ret=%d, bytes=%d)\n", ret, bytes_sent);
             fflush(stdout);
         }
-    } else {
+    } 
+    else {
+        printf("[SERVER] Unknown command: %s\n", cmd);
+        fflush(stdout);
         const char* response = "ERR: Unknown command\n";
         ret = sock_send(client_fd, response, strlen(response), 0, &bytes_sent);
         if (ret != 0 || bytes_sent != strlen(response)) {
@@ -274,8 +314,8 @@ void handle_client(int client_fd) {
         }
     }
     
-    // Shutdown write side and close socket after sending response
-    printf("[SERVER] Shutting down and closing client connection\n");
+    // Always properly shutdown and close client connection after sending response
+    printf("[SERVER] Shutting down and closing client connection (fd=%d)\n", client_fd);
     fflush(stdout);
     
     ret = sock_shutdown(client_fd, 1);  // SHUT_WR
@@ -302,6 +342,21 @@ int main() {
     set_key("test2", "value2");
     printf("[SERVER] Initialized with %d test entries\n", num_entries);
     fflush(stdout);
+    
+    // Create a test file in /tmp to ensure file operations work
+    char test_filename[256];
+    snprintf(test_filename, sizeof(test_filename), "%s/kv_test.txt", KV_DIR);
+    FILE* test_file = fopen(test_filename, "w");
+    if (test_file == NULL) {
+        printf("[SERVER] WARNING: Could not create test file at %s (errno=%d)\n", 
+               test_filename, errno);
+        fflush(stdout);
+    } else {
+        fprintf(test_file, "KV Server Test\n");
+        fclose(test_file);
+        printf("[SERVER] Successfully created test file at %s\n", test_filename);
+        fflush(stdout);
+    }
     
     ret = sock_open(2, 1, 0, &server_fd); // AF_INET=2, SOCK_STREAM=1
     if (ret != 0) {
@@ -330,7 +385,7 @@ int main() {
         
         handle_client(client_fd);
         
-        printf("[SERVER] Client connection handled\n");
+        printf("[SERVER] Client connection handled, ready for next connection\n");
         fflush(stdout);
     }
     return 0;
