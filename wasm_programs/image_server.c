@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <stdint.h>
 
 // WASI socket functions
 __attribute__((import_module("wasi_snapshot_preview1")))
@@ -35,6 +36,11 @@ __attribute__((import_module("wasi_snapshot_preview1")))
 __attribute__((import_name("sock_close")))
 int sock_close(int sock_fd);
 
+// WASI clock functions
+__attribute__((import_module("wasi_snapshot_preview1")))
+__attribute__((import_name("clock_time_get")))
+int clock_time_get(int clock_id, uint64_t precision, uint64_t* time);
+
 #define BUF_SIZE 4096
 #define MAX_FILENAME 256
 #define MAX_CMD_SIZE 1024
@@ -57,11 +63,23 @@ uint32_t ntohl(uint32_t netlong) {
            ((uint32_t)bytes[3]);
 }
 
+// Helper function to get current timestamp in milliseconds using WASI clock
+int64_t get_timestamp_ms() {
+    uint64_t time;
+    int ret = clock_time_get(1, 0, &time); // CLOCK_MONOTONIC = 1
+    if (ret != 0) {
+        printf("[SERVER] Failed to get time from WASI clock\n");
+        return 0;
+    }
+    return time / 1000000; // Convert nanoseconds to milliseconds
+}
+
 void handle_client(int client_fd) {
     char cmd_buf[MAX_CMD_SIZE];
     int bytes_received;
     int bytes_sent;
     int ret;
+    int64_t start_time, end_time;
     
     printf("[SERVER] New client connection on fd %d\n", client_fd);
     fflush(stdout);
@@ -135,6 +153,8 @@ void handle_client(int client_fd) {
         char buffer[BUF_SIZE];
         uint32_t remaining = file_size;
         uint32_t total_written = 0;
+        start_time = get_timestamp_ms();
+        
         while (remaining > 0) {
             int to_read = remaining > BUF_SIZE ? BUF_SIZE : remaining;
             ret = sock_recv(client_fd, buffer, to_read, 0, &bytes_received, NULL);
@@ -158,7 +178,9 @@ void handle_client(int client_fd) {
             fflush(stdout);
         }
         close(fd);
-        printf("[SERVER] Finished writing file %s (%u bytes total)\n", filename, total_written);
+        end_time = get_timestamp_ms();
+        printf("[SERVER] Finished writing file %s (%u bytes total) in %lld ms\n", 
+               filename, total_written, (long long)(end_time - start_time));
         fflush(stdout);
         
         // Send success response
@@ -243,6 +265,8 @@ void handle_client(int client_fd) {
         char buffer[BUF_SIZE];
         uint32_t remaining = file_size;
         uint32_t total_sent = 0;
+        start_time = get_timestamp_ms();
+        
         while (remaining > 0) {
             // only ever try to read as much as we know is left
             size_t to_read = remaining < BUF_SIZE ? remaining : BUF_SIZE;
@@ -273,10 +297,24 @@ void handle_client(int client_fd) {
             fflush(stdout);
         }
         close(fd);
-        printf("[SERVER] Finished sending file %s (%u bytes total)\n", filename, total_sent);
+        end_time = get_timestamp_ms();
+        printf("[SERVER] Finished sending file %s (%u bytes total) in %lld ms\n", 
+               filename, total_sent, (long long)(end_time - start_time));
         fflush(stdout);
         
-        // Shutdown write side and close socket after successful send
+        // Wait for client acknowledgment before closing
+        char ack[3];  // Changed from 4 to 3 for "OK\n"
+        int ack_bytes;
+        ret = sock_recv(client_fd, ack, sizeof(ack), 0, &ack_bytes, NULL);
+        if (ret == 0 && ack_bytes == sizeof(ack) && memcmp(ack, "OK\n", 3) == 0) {
+            printf("[SERVER] Received client acknowledgment\n");
+            fflush(stdout);
+        } else {
+            printf("[SERVER] No acknowledgment received from client\n");
+            fflush(stdout);
+        }
+        
+        // Shutdown write side and close socket
         printf("[SERVER] Shutting down write side of socket\n");
         fflush(stdout);
         ret = sock_shutdown(client_fd, 1);  // SHUT_WR
@@ -284,6 +322,10 @@ void handle_client(int client_fd) {
             printf("[SERVER] Failed to shutdown socket (ret=%d)\n", ret);
             fflush(stdout);
         }
+        
+        // Give client time to process the shutdown
+        usleep(100000);  // 100ms delay
+        
         printf("[SERVER] Closing socket\n");
         fflush(stdout);
         ret = sock_close(client_fd);
@@ -320,9 +362,12 @@ int main() {
     int server_fd;
     int client_fd;
     int ret;
+    int64_t start_time, end_time;
     
     printf("[SERVER] Starting image server...\n");
     fflush(stdout);
+    
+    start_time = get_timestamp_ms();
     
     // Open a socket
     ret = sock_open(2, 1, 0, &server_fd); // AF_INET=2, SOCK_STREAM=1
@@ -340,6 +385,10 @@ int main() {
         return 1;
     }
     printf("[SERVER] Server listening on port 7000\n");
+    fflush(stdout);
+
+    end_time = get_timestamp_ms();
+    printf("[SERVER] Server initialization completed in %lld ms\n", (long long)(end_time - start_time));
     fflush(stdout);
 
     // Main server loop

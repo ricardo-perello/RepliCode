@@ -50,6 +50,7 @@ fn send_file(stream: &mut TcpStream, filename: &str) -> io::Result<()> {
 fn get_file(stream: &mut TcpStream, filename: &str) -> io::Result<()> {
     // Send command
     writeln!(stream, "GET {}", filename)?;
+    stream.flush()?;
     
     // Read file size
     let mut size_buf = [0u8; 4];
@@ -84,7 +85,22 @@ fn get_file(stream: &mut TcpStream, filename: &str) -> io::Result<()> {
         total_received += n;
         println!("[CLIENT] Received {} bytes, {} bytes remaining", n, file_size.saturating_sub(total_received as u32));
     }
+    
+    // Flush the file to ensure all data is written
+    file.flush()?;
     println!("[CLIENT] Finished receiving file '{}'. Total bytes received: {}", filename, total_received);
+    
+    // Send acknowledgment to server
+    stream.write_all(b"OK\n")?;
+    stream.flush()?;
+    
+    // Wait for server to shutdown write side
+    let mut shutdown_buf = [0u8; 1];
+    match stream.read(&mut shutdown_buf) {
+        Ok(0) => println!("[CLIENT] Server closed connection normally"),
+        Ok(_) => println!("[CLIENT] Unexpected data after file transfer"),
+        Err(e) => println!("[CLIENT] Error reading after file transfer: {}", e),
+    }
     
     Ok(())
 }
