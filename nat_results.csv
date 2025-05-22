@@ -1,0 +1,3 @@
+op,file_name,file_size,client_sent,server_recv,nat_bytes,overhead_bytes,overhead_%
+recv,landscape.jpg,4268315,4268315,4268315,4268333,18,0
+send,landscape.jpg,4268315,4268315,4268315,4268333,18,0

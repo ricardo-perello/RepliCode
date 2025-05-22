@@ -116,6 +116,9 @@ impl RuntimeManager {
     /// Broadcasts a batch to all connected runtimes that haven't processed it yet.
     pub fn broadcast_batch(&self, batch: &Batch) {
         debug!("Broadcasting batch {} to all runtimes ({} bytes)", batch.number, batch.data.len());
+        if batch.data.len() > 27 {
+            info!("Broadcasting batch {} to all runtimes ({} bytes)", batch.number, batch.data.len());
+        }
         let conns = self.runtimes.lock().unwrap();
         let mut sent_count = 0;
         let mut error_count = 0;

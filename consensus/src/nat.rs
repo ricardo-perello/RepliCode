@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::{TcpStream, TcpListener};
 use std::io::{Write, Read};
-use log::{info, error, debug};
+use log::{info, error, debug, warn};
 use crate::commands::NetworkOperation;
 use serde_json::json;
 
@@ -58,6 +58,7 @@ impl NatTable {
         op: NetworkOperation,
         messages: &mut Vec<(u64, u16, Vec<u8>, bool)>,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        let start_time = std::time::Instant::now();
         debug!("Handling network operation for process {}: {:?}", pid, op);
         match op {
             NetworkOperation::Listen { src_port } => {
@@ -190,6 +191,7 @@ impl NatTable {
                 }
             }
             NetworkOperation::Send { src_port, data } => {
+                let start_time = std::time::Instant::now();
                 info!("Processing send operation for process {}:{} ({} bytes): {:?}", 
                      pid, src_port, data.len(), String::from_utf8_lossy(&data));
                 
@@ -204,7 +206,8 @@ impl NatTable {
                                     error!("Failed to flush data to connection: {}", e);
                                     return Err(Box::new(e));
                                 }
-                                info!("Successfully sent and flushed {} bytes to connection", data.len());
+                                info!("Send operation completed in {:?} with {} bytes", 
+                                     start_time.elapsed(), data.len());
                                 Ok(true)
                             }
                             Err(e) => {
@@ -246,6 +249,7 @@ impl NatTable {
                 }
             }
             NetworkOperation::Recv { src_port } => {
+                let start_time = std::time::Instant::now();
                 // Only check the buffer, do not read from the socket here
                 if let Some(&consensus_port) = self.connections.get(&(pid, src_port)) {
                     if let Some(entry) = self.port_mappings.get_mut(&consensus_port) {
@@ -254,7 +258,8 @@ impl NatTable {
                             let data = entry.buffer.clone();
                             entry.buffer.clear();
                             self.waiting_recvs.remove(&(pid, src_port));
-                            info!("Returning {} bytes of buffered data for process {}:{}", data.len(), pid, src_port);
+                            info!("Recv operation completed in {:?} with {} bytes", 
+                                 start_time.elapsed(), data.len());
                             messages.push((pid, src_port, data, false));
                             Ok(true)
                         } else {
@@ -399,6 +404,7 @@ impl NatTable {
     pub fn check_for_incoming_data(&mut self) -> Vec<(u64, u16, Vec<u8>, bool)> {
         let mut messages = Vec::new();
         let mut to_remove = Vec::new();
+        let start_time = std::time::Instant::now();
 
         // First check all listeners for new connections
         let waiting_listeners: Vec<(u64, u16)> = self.listeners.keys()
@@ -501,7 +507,8 @@ impl NatTable {
                     // Only push to messages if this process is waiting for recv
                     let is_waiting = self.waiting_recvs.contains_key(&(entry.process_id, entry.process_port));
                     if is_waiting {
-                        info!("Delivering {} bytes from buffer to waiting process {}:{}", entry.buffer.len(), entry.process_id, entry.process_port);
+                        info!("Delivered {} bytes to process {}:{} in {:?}", 
+                             entry.buffer.len(), entry.process_id, entry.process_port, start_time.elapsed());
                         messages.push((
                             entry.process_id,
                             entry.process_port,

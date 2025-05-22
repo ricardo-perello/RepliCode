@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::fs::File;
 use byteorder::{LittleEndian, ReadBytesExt};
-use log::{info, error, debug};
+use log::{info, error, debug, warn};
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::runtime::clock::GlobalClock;
 use crate::runtime::process;
@@ -38,6 +38,7 @@ pub fn process_consensus_pipe<R: Read + Write>(
     processes: &mut Vec<process::Process>,
     outgoing_messages: Vec<OutgoingNetworkMessage>,
 ) -> Result<bool> {
+    let batch_start_time = std::time::Instant::now();
     debug!("Processing consensus pipe with {} outgoing messages", outgoing_messages.len());
 
     // First, send any outgoing network messages as a batch
@@ -45,6 +46,8 @@ pub fn process_consensus_pipe<R: Read + Write>(
         let batch_number = OUTGOING_BATCH_NUMBER.fetch_add(1, Ordering::SeqCst);
         let direction = 1u8; // Outgoing
         let mut batch_data = Vec::new();
+        let start_time = std::time::Instant::now();
+        
         for msg in outgoing_messages {
             debug!("Sending outgoing network message for process {}: {:?}", msg.pid, msg.operation);
             // Write message type (NetworkOut = 5)
@@ -56,13 +59,17 @@ pub fn process_consensus_pipe<R: Read + Write>(
             batch_data.extend_from_slice(&(op_bytes.len() as u32).to_le_bytes());
             batch_data.extend_from_slice(&op_bytes);
         }
+        
         // Write batch header
         reader.get_mut().write_all(&batch_number.to_le_bytes())?;
         reader.get_mut().write_all(&[direction])?;
         reader.get_mut().write_all(&(batch_data.len() as u64).to_le_bytes())?;
         // Write batch data
         reader.get_mut().write_all(&batch_data)?;
-        debug!("Sent outgoing batch {} ({} bytes)", batch_number, batch_data.len());
+        
+        let duration = start_time.elapsed();
+        info!("Consensus sent outgoing batch {} ({} bytes) in {:?}", 
+             batch_number, batch_data.len(), duration);
     }
 
     // Read batch header (8 bytes for batch number, 1 byte for direction)
@@ -199,6 +206,8 @@ pub fn process_consensus_pipe<R: Read + Write>(
             },
             3 => { // NetworkIn
                 debug!("Processing NetworkIn for process {}", process_id);
+                let start_time = std::time::Instant::now();
+                
                 // The payload already contains the port + data
                 // First 2 bytes are the destination port
                 if payload.len() < 2 {
@@ -209,7 +218,8 @@ pub fn process_consensus_pipe<R: Read + Write>(
                 let dest_port = (payload[0] as u16) | ((payload[1] as u16) << 8);
                 let data = &payload[2..];
                 
-                debug!("Received {} bytes from network for process {} port {}: {}", data.len(), process_id, dest_port, String::from_utf8_lossy(data));
+                info!("Consensus received {} bytes from network for process {} port {} in {:?}", 
+                     data.len(), process_id, dest_port, start_time.elapsed());
                 
                 let mut found = false;
                 for process in processes.iter_mut() {
@@ -348,6 +358,17 @@ pub fn process_consensus_pipe<R: Read + Write>(
             }
         }
         processed_records += 1;
+    }
+
+    let batch_duration = batch_start_time.elapsed();
+    
+    if processed_records > 1 {
+        info!("Consensus processed batch {} with {} records in {:?}", 
+             batch_number, processed_records, batch_duration);
+    }
+    else {
+        debug!("Consensus processed batch {} with {} records in {:?}", 
+             batch_number, processed_records, batch_duration);
     }
     Ok(true) // For pipe mode, we always return true to keep scheduler running
 }

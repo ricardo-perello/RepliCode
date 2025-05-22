@@ -91,13 +91,13 @@ impl TcpMode {
             let mut batch_number = 0u64;
             info!("Batch sender thread started");
             loop {
-                thread::sleep(Duration::from_millis(350));
+                thread::sleep(Duration::from_micros(15000));
                 let mut buf = buffer.lock().unwrap();
                 batch_number += 1;
                 debug!("Creating new batch {} with {} bytes", batch_number, buf.len());
                 
                 // Append clock record for 10 seconds
-                if let Ok(clock_record) = write_record(&Command::Clock(350_000_000)) {
+                if let Ok(clock_record) = write_record(&Command::Clock(15_000_000)) {
                     buf.extend(clock_record);
                     debug!("Added clock record for 10 seconds");
                 } else {
@@ -338,7 +338,7 @@ impl TcpMode {
                     }
                 }
                 // Sleep briefly to avoid tight loop
-                thread::sleep(Duration::from_millis(10));
+                //thread::sleep(Duration::from_millis(10));
             }
         });
         info!("Runtime reader thread initialized successfully");
@@ -353,7 +353,7 @@ impl TcpMode {
         thread::spawn(move || {
             info!("NAT checker thread started");
             loop {
-                thread::sleep(Duration::from_millis(100));
+                //thread::sleep(Duration::from_millis(10));
                 let messages = nat_table.lock().unwrap().check_for_incoming_data();
                 if !messages.is_empty() {
                     debug!("Processing {} NAT messages", messages.len());

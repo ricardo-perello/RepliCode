@@ -2,7 +2,7 @@ use wasmtime::Caller;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
 use consensus::commands::NetworkOperation;
 use anyhow::Result;
-use log::{info, error, debug};
+use log::{info, error, debug, warn};
 
 #[derive(Debug, Clone)]
 pub struct OutgoingNetworkMessage {
@@ -90,6 +90,7 @@ pub fn wasi_sock_send(
     si_flags: i32,
     ret_data_len: i32,
 ) -> i32 {
+    let start_time = std::time::Instant::now();
     debug!("wasi_sock_send called with fd={}, si_data={}, si_data_len={}, si_flags={}, ret_data_len={}", 
         fd, si_data, si_data_len, si_flags, ret_data_len);
     let pid;
@@ -136,7 +137,8 @@ pub fn wasi_sock_send(
             pid,
             operation: op,
         });
-        info!("Queued send operation for process {}:{} ({} bytes)", pid, src_port, data.len());
+        info!("Runtime queued send operation for process {}:{} ({} bytes) in {:?}", 
+             pid, src_port, data.len(), start_time.elapsed());
     }
     
     // Block until consensus processes this
@@ -422,6 +424,7 @@ pub fn wasi_sock_recv(
     ro_datalen_ptr: u32,
     ro_flags_ptr: u32,
 ) -> i32 {
+    let start_time = std::time::Instant::now();
     debug!("wasi_sock_recv: fd={}, ri_data_ptr={}, ri_data_len={}, ri_flags={}, ro_datalen_ptr={}, ro_flags_ptr={}", 
         fd, ri_data_ptr, ri_data_len, ri_flags, ro_datalen_ptr, ro_flags_ptr);
     let pid;
@@ -439,7 +442,8 @@ pub fn wasi_sock_recv(
                 let to_take = buffer.len().min(ri_data_len as usize);
                 data = buffer.drain(..to_take).collect::<Vec<u8>>();
                 has_data = true;
-                debug!("Taking {} bytes from buffer ({} remaining)", to_take, buffer.len());
+                info!("Runtime read {} bytes from buffer for process {}:{} in {:?}", 
+                     to_take, pid, src_port, start_time.elapsed());
             }
         } else {
             error!("Invalid socket FD {} for process {}", fd, pid);
@@ -459,6 +463,8 @@ pub fn wasi_sock_recv(
             });
             // Set waiting state for recv
             process_data.nat_table.lock().unwrap().set_waiting_recv(pid, src_port);
+            info!("Runtime queued recv operation for process {}:{} in {:?}", 
+                 pid, src_port, start_time.elapsed());
         }
         debug!("Blocking process {} for network recv operation", pid);
         block_process_for_network(&mut caller);
@@ -474,7 +480,8 @@ pub fn wasi_sock_recv(
                     let to_take = buffer.len().min(ri_data_len as usize);
                     data2 = buffer.drain(..to_take).collect::<Vec<u8>>();
                     has_data2 = true;
-                    debug!("After blocking: Taking {} bytes from buffer ({} remaining)", to_take, buffer.len());
+                    info!("Runtime received {} bytes after blocking for process {}:{} in {:?}", 
+                         to_take, pid, src_port, start_time.elapsed());
                 }
             }
         }
