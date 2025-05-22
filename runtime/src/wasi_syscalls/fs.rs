@@ -47,7 +47,7 @@ fn block_process_for_fileio(caller: &mut Caller<'_, ProcessData>) {
 // ----------------------------------------------------------------------------
 
 /// Increment the process's tracked usage by `bytes`. If the limit is exceeded,
-/// forcibly kill the process.
+/// return an error code WASI_ERRNO_NOSPC.
 fn usage_add(caller: &mut Caller<'_, ProcessData>, bytes: u64) -> Result<(), i32> {
     // 1) Figure out if we exceed the limit
     let over_limit = {
@@ -60,10 +60,10 @@ fn usage_add(caller: &mut Caller<'_, ProcessData>, bytes: u64) -> Result<(), i32
         *usage > pd.max_disk_usage
     }; // Immutable borrow ends here
 
-    // 2) If over the limit, kill the process
+    // 2) If over the limit, return error code
     if over_limit {
-        eprintln!("Exceeded disk quota! Killing process...");
-        return Err(WASI_ERRNO_NOSPC);//TODO return error code
+        eprintln!("Exceeded disk quota! Returning NOSPC error.");
+        return Err(WASI_ERRNO_NOSPC);
     }
 
     Ok(())
@@ -655,6 +655,13 @@ pub fn wasi_path_open(
         Err(e) => {
             if o_creat {
                 // File doesn't exist, and O_CREAT is set: create it.
+                // First, check if creating this file would exceed disk quota
+                let metadata_size: u64 = 4096; // Default metadata size for a new file
+                if let Err(errno) = usage_add(&mut caller, metadata_size) {
+                    eprintln!("path_open: Creating file would exceed disk quota");
+                    return errno;
+                }
+                
                 match OpenOptions::new()
                     .write(true)
                     .create(true)
@@ -670,6 +677,8 @@ pub fn wasi_path_open(
                         (false, file_data)
                     }
                     Err(e) => {
+                        // Creation failed, so subtract the metadata size we added
+                        usage_sub(&mut caller, metadata_size);
                         eprintln!("path_open: Failed to create file: {}", e);
                         return io_err_to_wasi_errno(&e);
                     }
