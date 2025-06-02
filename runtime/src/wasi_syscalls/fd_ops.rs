@@ -2,9 +2,7 @@ use anyhow::Result;
 use wasmtime::Caller;
 use crate::runtime::process::ProcessData;
 use crate::runtime::fd_table::FDEntry;
-use log::{info, debug};
-use std::fs;
-use std::os::unix::fs::MetadataExt;
+use log::info;
 
 pub fn wasi_fd_advise(
     _caller: Caller<ProcessData>,

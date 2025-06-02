@@ -2,7 +2,7 @@ use wasmtime::Caller;
 use crate::runtime::process::{BlockReason, ProcessData, ProcessState};
 use consensus::commands::NetworkOperation;
 use anyhow::Result;
-use log::{info, error, debug, warn};
+use log::{info, error, debug};
 
 #[derive(Debug, Clone)]
 pub struct OutgoingNetworkMessage {

@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::fs::File;
 use byteorder::{LittleEndian, ReadBytesExt};
-use log::{info, error, debug, warn};
+use log::{info, error, debug};
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::runtime::clock::GlobalClock;
 use crate::runtime::process;

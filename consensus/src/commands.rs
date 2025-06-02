@@ -38,6 +38,7 @@ pub enum Command {
     },
     FDMsg(u64, Vec<u8>),
     NetworkIn(u64, u16, Vec<u8>),  // pid, dest_port, data
+    #[allow(dead_code)]
     NetworkOut(u64, NetworkOperation), // pid, operation
 }
 

@@ -604,7 +604,7 @@ pub fn wasi_path_open(
     // Let's assume that O_CREAT is indicated by bit 0x1.
     let o_creat = (oflags & 1) != 0;
     let is_readable = (oflags & 0x1) == 0; // O_RDONLY or O_RDWR
-    let is_writable = (oflags & 0x2) != 0; // O_WRONLY or O_RDWR
+    let _is_writable = (oflags & 0x2) != 0; // O_WRONLY or O_RDWR
 
     let (is_dir, file_data) = match fs::metadata(&canonical) {
         Ok(md) => {

@@ -3,8 +3,6 @@ use std::io::{self, BufRead, Write, Read, BufReader};
 use std::net::TcpStream;
 use std::time::Duration;
 
-const BUF_SIZE: usize = 4096;
-
 fn usage() {
     eprintln!("Usage: consensus kv-client <host> <port>");
     std::process::exit(1);

@@ -3,7 +3,6 @@ use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write, BufRead, BufReader};
 use std::net::TcpStream;
-use std::path::Path;
 
 const BUF_SIZE: usize = 4096;
 

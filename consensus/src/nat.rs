@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::net::{TcpStream, TcpListener};
 use std::io::{Write, Read};
-use log::{info, error, debug, warn};
+use log::{info, error, debug};
 use crate::commands::NetworkOperation;
 use serde_json::json;
 
+#[allow(dead_code)]
 pub struct NatEntry {
     pub process_id: u64,
     pub process_port: u16,
@@ -13,6 +14,7 @@ pub struct NatEntry {
     pub buffer: Vec<u8>,  // Add buffer for received data
 }
 
+#[allow(dead_code)]
 pub struct NatListener {
     pub process_id: u64,
     pub process_port: u16,
@@ -58,7 +60,7 @@ impl NatTable {
         op: NetworkOperation,
         messages: &mut Vec<(u64, u16, Vec<u8>, bool)>,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        let start_time = std::time::Instant::now();
+        let _start_time = std::time::Instant::now();
         debug!("Handling network operation for process {}: {:?}", pid, op);
         match op {
             NetworkOperation::Listen { src_port } => {
@@ -99,12 +101,6 @@ impl NatTable {
                     error!("No NAT mapping found for process {}:{}", pid, src_port);
                     return Ok(false);
                 }
-
-                // // Add this check to prevent port reuse
-                // if self.process_ports.contains_key(&(pid, new_port)) {
-                //     error!("Port {} already in use for process {}", new_port, pid);
-                //     return Ok(false);
-                // }
 
                 // Try to accept any pending connections
                 let accept_result = {
@@ -327,6 +323,7 @@ impl NatTable {
         debug!("Process {}:{} is now waiting for accept on port {}", pid, src_port, new_port);
     }
 
+    #[allow(dead_code)]
     pub fn set_waiting_recv(&mut self, pid: u64, src_port: u16) {
         self.waiting_recvs.insert((pid, src_port), true);
         debug!("Process {}:{} is now waiting for recv", pid, src_port);
@@ -337,6 +334,7 @@ impl NatTable {
         debug!("Process {}:{} is no longer waiting for accept", pid, src_port);
     }
 
+    #[allow(dead_code)]
     pub fn process_pending_accept(&mut self, pid: u64, src_port: u16) -> bool {
         debug!("Processing pending accept for process {}:{}", pid, src_port);
         
@@ -377,11 +375,13 @@ impl NatTable {
         }
     }
 
+    #[allow(dead_code)]
     pub fn clear_waiting_recv(&mut self, pid: u64, src_port: u16) {
         self.waiting_recvs.remove(&(pid, src_port));
         debug!("Process {}:{} is no longer waiting for recv", pid, src_port);
     }
 
+    #[allow(dead_code)]
     pub fn has_pending_accept(&self, pid: u64, src_port: u16) -> bool {
         if let Some(listener) = self.listeners.get(&(pid, src_port)) {
             !listener.pending_accepts.is_empty()
@@ -390,10 +390,12 @@ impl NatTable {
         }
     }
 
+    #[allow(dead_code)]
     pub fn has_port_mapping(&self, pid: u64, src_port: u16) -> bool {
         self.process_ports.contains_key(&(pid, src_port))
     }
 
+    #[allow(dead_code)]
     pub fn add_port_mapping(&mut self, pid: u64, src_port: u16) {
         let consensus_port = self.next_port;
         self.next_port += 1;

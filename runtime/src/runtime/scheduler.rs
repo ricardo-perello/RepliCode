@@ -10,7 +10,6 @@ use std::{collections::VecDeque, fs};
 use std::io::{Read, Write};
 use log::{debug, error, info};
 use std::thread;
-use std::time::Duration;
 use crate::wasi_syscalls::net::OutgoingNetworkMessage;
 use crate::runtime::fd_table::FDEntry;
 use std::io::BufReader;
