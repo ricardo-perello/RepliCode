@@ -14,7 +14,8 @@ This project integrates **Wasmtime**, a WebAssembly runtime, and extends it with
 - **Deterministic I/O**: File operations, sockets, and system calls behave consistently across all nodes  
 - **Replicated Execution**: All nodes execute the same state transitions in lockstep  
 - **Integration with Consensus Mechanisms** to ensure verifiable execution  
-- **Network Layer**: Deterministic socket operations and connection management
+- **Network Layer**: Deterministic socket operations and connection management with NAT-inspired abstraction
+- **Elastic Scaling**: New runtimes can join mid-execution with minimal latency (≤211ms)
 - **Future Work**: Support for **multi-threading and advanced filesystem access** in a deterministic manner  
 
 ---
@@ -25,6 +26,16 @@ This project integrates **Wasmtime**, a WebAssembly runtime, and extends it with
 - **WebAssembly Compilation:** Clang + WASI SDK  
 - **Target Environment:** Linux/macOS  
 - **Consensus Mechanism:** Blockchain-based replication  
+- **Batch Size:** 4KB with 27-byte metadata header
+- **Minimum Batch Interval:** 15ms for reliable operation
+
+---
+
+## **Performance Characteristics**
+- **Network Overhead:** Fixed 27 bytes per batch (≤0.75% for large files)
+- **Synchronization Latency:** ≤211ms for new runtime joins
+- **Metadata Cost:** Linear scaling with 54 bytes per batch
+- **Throughput:** Optimized for 4KB batches with ≥15ms intervals
 
 ---
 
@@ -37,21 +48,25 @@ RepliCode/
 │   └── consensus_input.bin  # Consensus input data
 │── runtime/             # Rust runtime implementation
 │   ├── src/             # Runtime source files
+│   ├── tests/           # Runtime test suite
 │   └── Cargo.toml       # Runtime package configuration
-│── wasi_sandbox/        # WASI sandbox environment
-│   ├── pid_2/          # Process-specific sandbox
-│   └── standard1/      # Standard sandbox configuration
 │── wasm_programs/       # C programs compiled to WASM
-│   ├── hello.c         # Sample C program for testing
-│   ├── Makefile        # C to WASM build automation
-│   └── build/          # Compiled WASM binaries
+│   ├── build/          # Compiled WASM binaries
+│   ├── hello.c         # Basic test program
+│   ├── image_server.c  # Image server implementation
+│   ├── kv_server.c     # Key-value server implementation
+│   ├── network_server.c # Network server implementation
+│   ├── test_*.c        # Various test programs
+│   └── Makefile        # C to WASM build automation
 │── docs/               # Documentation
-│   ├── design.md       # Design decisions and architecture
-│   └── research.md     # Notes on deterministic execution  
-│── Cargo.toml          # Root package configuration
-│── Cargo.lock          # Dependency lock file
-│── .gitignore         # Git ignore rules
-│── README.md          # Project overview
+│   ├── Deterministic IO # Design decisions and architecture
+│   └── Security and Isolation  # Notes on deterministic execution
+│── test/              # Integration tests
+│── sessions/          # Runtime session data
+│── Cargo.toml         # Root package configuration
+│── Cargo.lock         # Dependency lock file
+│── .gitignore        # Git ignore rules
+│── README.md         # Project overview
 ```
 
 ---
@@ -116,13 +131,16 @@ This will execute the WASM program inside the RepliCode runtime with multiple re
 ✅ Integrate socket-based communication  
 ✅ Develop a replicated system call layer  
 ✅ TCP-based consensus communication
-
+✅ NAT-inspired network abstraction layer
+✅ Deterministic port assignment and isolation
 
 ### **Phase 3: Multi-Threading & Networking (Planned)**  
 🔲 Support for POSIX threads (`pthreads`)  
 🔲 Advanced network stack integration  
 🔲 Performance optimizations  
 🔲 Fault tolerance mechanisms
+🔲 Security hardening for production use
+🔲 Resource management improvements
 
 ---
 
@@ -195,11 +213,3 @@ RepliCode is under active development. Contributions in system architecture, Rus
 This project is released under the **MIT License**.  
 
 ---
-
-### **✅ Commit & Push**
-```sh
-git add README.md
-git commit -m "docs: initial project documentation"
-git push origin main
-```
-
