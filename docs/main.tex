@@ -1,5 +1,4 @@
-\documentclass[10pt, 
-]{IEEEtran}
+\documentclass[10pt]{IEEEtran}
 \usepackage{graphicx}
 \usepackage{amsmath}
 \usepackage{hyperref}
@@ -10,6 +9,9 @@
 \usepackage{amssymb}   % For \leq and \geq
 \usepackage{tabularx}  % For better table control
 \usepackage{booktabs}  % For professional tables
+\usepackage{tikz}
+\usepackage{pgfplots}
+
 
 % Define Rust language for listings
 \lstdefinelanguage{Rust}{
@@ -111,7 +113,7 @@ The ability to join mid-execution and become immediately consistent is key to Re
 
 The RepliCode architecture consists of two core components: a centralized \textbf{consensus server} and multiple distributed \textbf{replicated runtimes}. The consensus server coordinates external I/O operations and enforces deterministic execution by maintaining and broadcasting ordered sequences of operations known as \emph{batches}. Critically, \textbf{all communication} between the consensus server and runtimes occurs exclusively through these batches, ensuring strict determinism and consistency across the system.
 
-A \textbf{batch} is an ordered set of high-level \emph{commands}, representing either user inputs or external system events. Each batch is finalized by appending a logical clock tick, creating a global timeline shared by all runtimes. The global clock ensures that all runtimes process events in the same order, even if they have different processing speeds or resource constraints. Batches are generated at configurable fixed intervals, ensuring consistent timing across all runtime instances. Each batch includes a clock record to maintain synchronization.
+A \textbf{batch} is an ordered set of high-level \emph{commands}, representing either user inputs or external system events. Each batch is finalized by appending a logical clock tick, creating a global timeline shared by all runtimes. The global clock ensures that all runtimes process events in the same order, even if they have different processing speeds or resource constraints. Batches are generated at configurable fixed intervals, ensuring consistent timing across all runtime instances.
 
 \subsection{Consensus Server}
 
@@ -123,6 +125,8 @@ The consensus server acts as the central authority and performs four primary rol
 \item \textbf{HTTP Server:} Publishes NAT mappings publicly, allowing external clients to discover the correct ports for interacting with services running inside runtimes.
 \item \textbf{Command Interface:} Accepts user commands via a command-line interface (CLI), buffering them until the batch timer triggers batch creation.
 \end{itemize}
+
+It is important to note that while we refer to this component as a "consensus server," it is in reality a simplified abstraction of a true consensus mechanism. The server acts as a centralized authority that enforces deterministic ordering of operations, rather than implementing a full Byzantine fault-tolerant consensus protocol. This design choice was made to focus on the core challenges of deterministic execution and network operation ordering, while acknowledging that a production system would require a more robust consensus mechanism to handle Byzantine failures and ensure true distributed consensus.
 
 Upon each timer expiration, the consensus server aggregates buffered user commands and intercepted I/O operations, appends a logical timestamp, and broadcasts this batch to all connected runtimes. All batches are persistently logged.
 
@@ -174,7 +178,7 @@ The following steps illustrate the high-level execution flow in RepliCode:
 The NAT module provides deterministic management of network interactions. It operates through a structured mapping mechanism, maintaining consistent port assignments and connection states across all runtimes. The key components and responsibilities of the NAT module include:
 
 \begin{itemize}
-\item \textbf{Port Allocation and Mapping:} The NAT assigns public ports deterministically to internal process ports upon request, maintaining consistent mappings across all replicas. Each process-port pair receives a unique public port to avoid conflicts.
+\item \textbf{Port Allocation and Mapping:} The NAT assigns public ports deterministically to internal process sockets upon request, maintaining consistent mappings across all replicas. Each process-socket pair receives a unique public port to avoid conflicts.
 \item \textbf{Connection Management:} NAT tracks connections initiated by runtimes, maintaining mappings between internal and consensus-level ports. It manages connection lifecycles explicitly, handling establishment, data forwarding, and termination deterministically.
 \item \textbf{Buffering and Forwarding:} Incoming data from external clients is buffered by NAT until requested by processes. NAT forwards data deterministically, ensuring all runtimes receive identical data streams at the same points in their execution.
 \item \textbf{Non-blocking Operations and Waiting States:} Operations such as \texttt{accept} and \texttt{recv} may temporarily block if no data or connections are available. NAT manages these states explicitly, marking operations as waiting and resuming them once the relevant events occur.
@@ -398,7 +402,17 @@ The command processing system ensures that all operations are properly ordered a
 
 \subsection{Runtime Implementation}
 
-The runtime component is responsible for executing WebAssembly processes deterministically while maintaining synchronization with the consensus server. It consists of several key components that work together to ensure consistent execution across all instances.
+The runtime component is responsible for executing WebAssembly processes deterministically while maintaining synchronization with the consensus server. It consists of several key components that work together to ensure consistent execution across all instances:
+
+\begin{itemize}
+    \item \textbf{Process Management:} Handles process creation, isolation, and state tracking.
+    \item \textbf{Deterministic Scheduler:} Controls execution order and process scheduling.
+    \item \textbf{Network Operations:} Implements deterministic network system calls.
+    \item \textbf{Consensus Input Processing:} Manages batch processing and state updates.
+    \item \textbf{Process Isolation:} Ensures sandboxed execution and resource limits.
+\end{itemize}
+
+A key aspect of the runtime's determinism is its use of a custom global clock implementation rather than the system's real-time clock. This clock, implemented as an atomic counter, ensures that all runtime instances maintain synchronized timing without relying on potentially divergent system timestamps.
 
 \subsection{Process Management}
 
@@ -543,24 +557,48 @@ This isolation ensures that processes cannot interfere with each other while mai
 \textbf{Software:} Each runtime was compiled using Rust (debug profile) and executed on macOS. We used debug mode to facilitate detailed debugging and logging during this development phase, though future performance-oriented evaluations should use Rust's optimized release mode. To demonstrate the system's capabilities, we implemented a simple TCP-based image server that handles file transfers through the NAT layer to external clients.
 
 \subsection{Experiment 1: Network Overhead}
-\textbf{Question:} What is the overhead introduced by the deterministic NAT layer in terms of bytes, throughput, and latency? \\
-\textbf{Method:} We compared file transfers between a direct client-server setup and one using the NAT layer. Transfers used 4 KB batching. \\
-\textbf{Results:} The NAT layer introduced a fixed overhead of 27 bytes per batch for small files (3.6 KB) and 3,629 bytes for larger files (2.0 MB), representing only 0.75\% and 0.17\% overhead respectively. The system added approximately 50 microseconds of latency per batch, plus the batch interval. This constant overhead means that for a file that fits in a single batch, the total overhead is just 27 bytes, while for a file requiring n batches, the overhead is 27n bytes.
+\textbf{Question:} What is the overhead introduced by the deterministic NAT layer in terms of bytes and latency? \\
+
+\textbf{Method:} We compared file transfers between a direct client-server setup and one using the NAT layer. Transfers used 4 KB batching, where each batch carried up to 4096 bytes of payload plus a fixed 27-byte metadata header. \\
+
+\textbf{Results:} The NAT layer consistently added 27 bytes of metadata per batch. For a small 3.6 KB file that fit entirely within a single partially filled batch (3686 bytes of payload), the total overhead was 27 bytes, or approximately 0.73\%. For a larger 2 MB file sent in 512 full batches of 4096 bytes each, the total metadata overhead amounted to 3629 bytes, or about 0.17\%. The NAT layer also introduced an additional 50 microseconds of latency per batch, in addition to the batch interval. \\
 
 \textbf{Observations:}
 \begin{itemize}
-    \item Overhead remained constant (27 bytes) per batch
-    \item Relative overhead dropped as file size increased
-    \item Throughput was unaffected in practice
+\item Overhead remained fixed at 27 bytes per batch
+\item Relative overhead decreased as file size increased
+\item Throughput was highly affected by both the batch interval and the batch size, with shorter intervals and larger batches yielding significantly better performance
 \end{itemize}
 \textbf{Deductions:}
 \begin{itemize}
-    \item Larger batch sizes reduce the relative cost of NAT metadata
-    \item The NAT layer provides determinism with negligible performance impact
+    \item Larger batches amortize the metadata cost more effectively
+    \item The NAT layer achieves deterministic behavior with negligible overhead
 \end{itemize}
-\textbf{Conclusion:} The NAT layer introduces minimal and predictable overhead, confirming its practicality for real-world deterministic systems.
 
-\subsection{Experiment 2: Consistent File Transfers}
+\textbf{Conclusion:} The NAT layer introduces a small and predictable per-batch overhead. Its low impact on throughput and latency confirms its practicality for real-world deterministic systems.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+\begin{semilogxaxis}[
+    xlabel={Batch Size (bytes)},
+    ylabel={Overhead Percentage (\%)},
+    xmin=10, xmax=30000,
+    ymin=0, ymax=100,
+    grid=both,
+    legend style={at={(0.95,0.95)},anchor=north east},
+    width=0.48\textwidth,
+    height=0.3\textwidth,
+    tick align=outside,
+    tick pos=left
+]
+\addplot[blue, thick, domain=10:30000, samples=300] {27 / x * 100};
+
+\end{semilogxaxis}
+\end{tikzpicture}
+\caption{Metadata overhead percentage as a function of batch size. The curve shows the overhead of 27 bytes per batch as a function of batch size.}
+\label{fig:overhead}
+\end{figure}\subsection{Experiment 2: Consistent File Transfers}
 \textbf{Question:} Does the NAT layer ensure consistent operation ordering and data delivery across all runtime instances? \\
 \textbf{Method:} Three runtime servers were launched. Clients performed SEND and GET operations for small, medium, and large files via the NAT. \\
 \textbf{Observations:}
@@ -688,7 +726,7 @@ Our evaluation demonstrates that the deterministic NAT layer delivers on its cor
 These results confirm that the system enforces deterministic network semantics while remaining practical, efficient, and robust under load. The NAT layer is suitable for replicated runtime environments where correctness and consistency are critical.
 
 \section{Related Work}
-RepliCode builds on several key areas of research in distributed systems and deterministic execution. Traditional replicated state machines \cite{deterministic2010} provide the foundation for deterministic execution but often sacrifice I/O capabilities. Our work extends these concepts to WebAssembly \cite{wasm2017} and WASI \cite{wasi2023}, providing a practical solution for deterministic execution in distributed environments. The security and process isolation aspects of our system are described in detail in a companion paper \cite{replicode2025}.
+RepliCode builds on several key areas of research in distributed systems and deterministic execution. Traditional replicated state machines \cite{deterministic2010} provide the foundation for deterministic execution but often sacrifice I/O capabilities. Our work extends these concepts to WebAssembly \cite{wasm2017} and WASI \cite{wasi2023}, providing a practical solution for deterministic execution in distributed environments. The security and process isolation aspects of our system are described in detail in a companion paper by M. Vital Nabholz \cite{replicode2025}.
 
 \section{Conclusion}
 RepliCode demonstrates the feasibility of deterministic execution in distributed WebAssembly environments through a novel NAT-inspired network abstraction layer. Our proof-of-concept implementation shows that it is possible to maintain bit-for-bit consistency across replicas while supporting real-world I/O operations and dynamic scaling. The evaluation results confirm that this can be achieved with minimal overhead and without sacrificing the flexibility needed for practical applications.
