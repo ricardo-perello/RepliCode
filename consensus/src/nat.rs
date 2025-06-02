@@ -635,6 +635,24 @@ impl NatTable {
         json!(listeners)
     }
 
+    pub fn get_port_mappings(&self) -> Vec<(u64, u16, u16, &'static str)> {
+        let mut mappings = Vec::new();
+        
+        for ((pid, process_port), &consensus_port) in &self.process_ports {
+            let mapping_type = if self.listeners.contains_key(&(*pid, *process_port)) {
+                "listener"
+            } else if self.connections.contains_key(&(*pid, *process_port)) {
+                "connection"
+            } else {
+                "unknown"
+            };
+            
+            mappings.push((*pid, *process_port, consensus_port, mapping_type));
+        }
+        
+        mappings
+    }
+
     pub fn get_waiting_port(&self, pid: u64, src_port: u16) -> Option<u16> {
         self.waiting_accepts.get(&(pid, src_port)).copied()
     }

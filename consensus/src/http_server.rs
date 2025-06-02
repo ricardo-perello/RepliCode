@@ -52,7 +52,15 @@ impl HttpServer {
                 let status = json!({
                     "processes": nat_table.get_process_info(),
                     "connections": nat_table.get_connection_info(),
-                    "listeners": nat_table.get_listener_info()
+                    "listeners": nat_table.get_listener_info(),
+                    "mappings": nat_table.get_port_mappings().iter().map(|(pid, process_port, consensus_port, mapping_type)| {
+                        json!({
+                            "pid": pid,
+                            "process_port": process_port,
+                            "consensus_port": consensus_port,
+                            "type": mapping_type
+                        })
+                    }).collect::<Vec<_>>()
                 });
                 format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
